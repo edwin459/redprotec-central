@@ -1,0 +1,13 @@
+# RedProtec — Relay central (Render Blueprint, plan free, sin tarjeta).
+# Al conectar este repo en Render (New → Blueprint), lo detecta y despliega solo.
+services:
+  - type: web
+    name: redprotec-central
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ONLINE_WINDOW_SECONDS
+        value: "150"

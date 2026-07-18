@@ -1,0 +1,23 @@
+# RedProtec — Relay central Multi-sede (Fly.io, free-friendly).
+# El nombre real de la app se fija al hacer `fly launch` (crea/edita este archivo).
+app = "redprotec-central"
+primary_region = "mia"   # Miami: buena latencia para LatAm. Cambia si prefieres.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  ONLINE_WINDOW_SECONDS = "150"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Free-friendly: la máquina se detiene sin tráfico y arranca sola al llegar un
+  # latido/consulta (auto_start). Para pruebas está perfecto.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
