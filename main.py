@@ -110,6 +110,7 @@ class DeviceEntry(BaseModel):
     online: bool = False
     trust: str = "unknown"  # trusted | unknown | blocked
     is_critical: bool = False
+    owner: str | None = None  # responsable del equipo en la sede
 
 
 class Heartbeat(BaseModel):
@@ -122,8 +123,9 @@ class Heartbeat(BaseModel):
 
 
 class CommandIn(BaseModel):
-    action: str = Field(pattern="^(block|trust|unblock)$")
+    action: str = Field(pattern="^(block|trust|unblock|rename|set_owner)$")
     mac: str = Field(min_length=1, max_length=64)
+    value: str | None = Field(default=None, max_length=120)  # nombre/responsable
 
 
 class SiteOut(BaseModel):
@@ -278,7 +280,10 @@ def heartbeat(hb: Heartbeat, org_token: str = Depends(require_org_token)) -> dic
             q = _COMMANDS.get(org_token, {}).get(hb.site_id, [])
             fresh = [c for c in q if (now - c["created_at"]).total_seconds() <= COMMAND_TTL_SECONDS]
             _COMMANDS.setdefault(org_token, {})[hb.site_id] = fresh
-            pending = [{"id": c["id"], "action": c["action"], "mac": c["mac"]} for c in fresh]
+            pending = [
+                {"id": c["id"], "action": c["action"], "mac": c["mac"], "value": c.get("value")}
+                for c in fresh
+            ]
 
     # Enviar pushes fuera del lock (I/O de red).
     for title, msg, prio, tags in alerts:
@@ -339,6 +344,7 @@ def enqueue_command(
             "id": uuid.uuid4().hex[:12],
             "action": cmd.action,
             "mac": cmd.mac,
+            "value": cmd.value,
             "created_at": now,
         }
         _COMMANDS.setdefault(org_token, {}).setdefault(site_id, []).append(command)
