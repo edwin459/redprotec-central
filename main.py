@@ -59,6 +59,36 @@ def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, ta
         pass
 
 
+def _fmt_device(d: dict) -> str:
+    """Ficha compacta y legible de un equipo para el cuerpo del push."""
+    name = d.get("name") or d.get("mac") or "Equipo"
+    vendor = (d.get("vendor") or "").strip() or "Desconocido"
+    ip = (d.get("ip") or "").strip() or "—"
+    mac = (d.get("mac") or "").strip() or "—"
+    return (
+        f"• Equipo: {name}\n"
+        f"• Fabricante: {vendor}\n"
+        f"• IP: {ip}\n"
+        f"• MAC: {mac}"
+    )
+
+
+def _unknown_macs(devs: list[dict] | None) -> set[str]:
+    return {
+        (d.get("mac") or "").upper()
+        for d in (devs or [])
+        if d.get("trust") == "unknown" and d.get("mac")
+    }
+
+
+def _down_criticals(devs: list[dict] | None) -> dict[str, dict]:
+    return {
+        (d.get("mac") or "").upper(): d
+        for d in (devs or [])
+        if d.get("is_critical") and not d.get("online") and d.get("mac")
+    }
+
+
 # ─────────────────────────── modelos ───────────────────────────
 class SiteSummary(BaseModel):
     devices_total: int = 0
@@ -158,27 +188,85 @@ def heartbeat(hb: Heartbeat, org_token: str = Depends(require_org_token)) -> dic
         org = _STORE.setdefault(org_token, {})
         prev = org.get(hb.site_id)
         new_summary = hb.summary.model_dump()
+        new_devices = (
+            [d.model_dump() for d in hb.devices] if hb.devices is not None else None
+        )
+        prev_devices = (prev or {}).get("devices")
 
         # ── Alertas por sede: avisar al dueño en las TRANSICIONES a peor ──
+        # Si hay inventario, se IDENTIFICA el equipo culpable (nombre/IP/MAC);
+        # si no, se cae a un mensaje genérico por conteo.
         if prev is not None:
             ps = prev["summary"]
+            when = now.strftime("%d/%m %H:%M UTC")
+
             if new_summary["alerts"] > ps.get("alerts", 0):
+                inv = new_devices if new_devices is not None else prev_devices
+                culprit_macs = _unknown_macs(new_devices) - _unknown_macs(prev_devices)
+                culprits = [
+                    d for d in (inv or [])
+                    if (d.get("mac") or "").upper() in culprit_macs
+                ]
+                if culprits:
+                    if len(culprits) == 1:
+                        body = (
+                            f"🚨 Equipo sin identificar en «{hb.site_name}»\n\n"
+                            f"{_fmt_device(culprits[0])}\n"
+                            f"• Detectado: {when}\n\n"
+                            f"Ábrelo en el panel para bloquearlo o marcarlo confiable."
+                        )
+                    else:
+                        listado = "\n".join(
+                            f"• {d.get('name') or d.get('mac')} "
+                            f"({d.get('ip') or '—'} · {d.get('mac')})"
+                            for d in culprits[:6]
+                        )
+                        body = (
+                            f"🚨 {len(culprits)} equipos sin identificar en "
+                            f"«{hb.site_name}»\n\n{listado}\n\nRevísalos en el panel."
+                        )
+                else:
+                    body = (
+                        f"🚨 Apareció un equipo desconocido en «{hb.site_name}».\n"
+                        f"Activa «Inventario completo» en esa sede para ver "
+                        f"nombre, IP y MAC aquí."
+                    )
                 alerts.append((
-                    f"🚨 {hb.site_name}: equipo sin identificar",
-                    f"Apareció un equipo desconocido en «{hb.site_name}».",
-                    "high", "warning",
+                    f"RedProtec — {hb.site_name}: equipo desconocido",
+                    body, "high", "warning",
                 ))
+
             if new_summary["criticals_down"] > ps.get("criticals_down", 0):
+                prev_down = _down_criticals(prev_devices)
+                cur_down = _down_criticals(new_devices)
+                newly_down = [
+                    cur_down[m] for m in (set(cur_down) - set(prev_down))
+                ] if new_devices is not None else []
+                if newly_down:
+                    d = newly_down[0]
+                    extra = (
+                        f"\n(y {len(newly_down) - 1} más)" if len(newly_down) > 1 else ""
+                    )
+                    body = (
+                        f"🔴 Activo crítico sin responder en «{hb.site_name}»\n\n"
+                        f"{_fmt_device(d)}\n"
+                        f"• Estado: sin responder desde {when}{extra}\n\n"
+                        f"Revisa la sede: el equipo dejó de estar en línea."
+                    )
+                else:
+                    body = (
+                        f"🔴 Un activo crítico dejó de responder en «{hb.site_name}».\n"
+                        f"Activa «Inventario completo» en esa sede para ver el detalle."
+                    )
                 alerts.append((
-                    f"🔴 {hb.site_name}: activo crítico caído",
-                    f"Un activo crítico dejó de responder en «{hb.site_name}».",
-                    "high", "rotating_light",
+                    f"RedProtec — {hb.site_name}: activo crítico caído",
+                    body, "high", "rotating_light",
                 ))
 
         org[hb.site_id] = {
             "site_name": hb.site_name,
             "summary": new_summary,
-            "devices": [d.model_dump() for d in hb.devices] if hb.devices is not None else (prev or {}).get("devices"),
+            "devices": new_devices if new_devices is not None else prev_devices,
             "remote_admin": hb.remote_admin,
             "updated_at": now,
         }
