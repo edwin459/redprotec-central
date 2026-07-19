@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import os
 import threading
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="RedProtec Central Relay", version="0.2.0")
+app = FastAPI(title="RedProtec Central Relay", version="0.3.0")
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -34,6 +35,28 @@ _LOCK = threading.Lock()
 _STORE: dict[str, dict[str, dict]] = {}
 # org_token -> site_id -> list[command]
 _COMMANDS: dict[str, dict[str, list[dict]]] = {}
+# org_token -> { alert_topic }  (config de la organización)
+_ORG_CONFIG: dict[str, dict] = {}
+
+
+def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, tags: str) -> None:
+    """Envía un push a ntfy (best-effort). El relay es el ÚNICO que ve todas las
+    sedes 24/7, así que es el lugar correcto para alertar al dueño de la org."""
+    if not topic or not topic.strip():
+        return
+    t = topic.strip()
+    url = t if t.startswith("http") else f"https://ntfy.sh/{t}"
+    safe_title = title.encode("ascii", "ignore").decode().strip() or "RedProtec"
+    try:
+        req = urllib.request.Request(
+            url,
+            data=message.encode("utf-8"),
+            method="POST",
+            headers={"Title": safe_title, "Priority": priority, "Tags": tags},
+        )
+        urllib.request.urlopen(req, timeout=8)  # noqa: S310
+    except Exception:
+        pass
 
 
 # ─────────────────────────── modelos ───────────────────────────
@@ -129,22 +152,50 @@ def health() -> dict:
 def heartbeat(hb: Heartbeat, org_token: str = Depends(require_org_token)) -> dict:
     """El agente reporta su sede y recoge comandos pendientes en la respuesta."""
     now = _now()
+    alert_topic = None
+    alerts: list[tuple[str, str, str, str]] = []  # (title, msg, priority, tags)
     with _LOCK:
         org = _STORE.setdefault(org_token, {})
+        prev = org.get(hb.site_id)
+        new_summary = hb.summary.model_dump()
+
+        # ── Alertas por sede: avisar al dueño en las TRANSICIONES a peor ──
+        if prev is not None:
+            ps = prev["summary"]
+            if new_summary["alerts"] > ps.get("alerts", 0):
+                alerts.append((
+                    f"🚨 {hb.site_name}: equipo sin identificar",
+                    f"Apareció un equipo desconocido en «{hb.site_name}».",
+                    "high", "warning",
+                ))
+            if new_summary["criticals_down"] > ps.get("criticals_down", 0):
+                alerts.append((
+                    f"🔴 {hb.site_name}: activo crítico caído",
+                    f"Un activo crítico dejó de responder en «{hb.site_name}».",
+                    "high", "rotating_light",
+                ))
+
         org[hb.site_id] = {
             "site_name": hb.site_name,
-            "summary": hb.summary.model_dump(),
-            "devices": [d.model_dump() for d in hb.devices] if hb.devices is not None else org.get(hb.site_id, {}).get("devices"),
+            "summary": new_summary,
+            "devices": [d.model_dump() for d in hb.devices] if hb.devices is not None else (prev or {}).get("devices"),
             "remote_admin": hb.remote_admin,
             "updated_at": now,
         }
-        # Comandos pendientes para esta sede (si permite admin remota).
+        if alerts:
+            alert_topic = _ORG_CONFIG.get(org_token, {}).get("alert_topic")
+
         pending: list[dict] = []
         if hb.remote_admin:
             q = _COMMANDS.get(org_token, {}).get(hb.site_id, [])
             fresh = [c for c in q if (now - c["created_at"]).total_seconds() <= COMMAND_TTL_SECONDS]
             _COMMANDS.setdefault(org_token, {})[hb.site_id] = fresh
             pending = [{"id": c["id"], "action": c["action"], "mac": c["mac"]} for c in fresh]
+
+    # Enviar pushes fuera del lock (I/O de red).
+    for title, msg, prio, tags in alerts:
+        _push_ntfy(alert_topic, title, msg, priority=prio, tags=tags)
+
     return {"ok": True, "commands": pending}
 
 
@@ -219,3 +270,67 @@ def ack_command(
             c for c in q if c["id"] != command_id
         ]
     return {"ok": True}
+
+
+# ─────────────────────── config de la organización ───────────────────────
+class OrgConfigIn(BaseModel):
+    alert_topic: str | None = None  # tema ntfy para alertas por sede
+
+
+@app.get("/v1/org/config")
+def get_org_config(org_token: str = Depends(require_org_token)) -> dict:
+    with _LOCK:
+        cfg = dict(_ORG_CONFIG.get(org_token, {}))
+    return {"alert_topic": cfg.get("alert_topic")}
+
+
+@app.post("/v1/org/config")
+def set_org_config(cfg: OrgConfigIn, org_token: str = Depends(require_org_token)) -> dict:
+    with _LOCK:
+        store = _ORG_CONFIG.setdefault(org_token, {})
+        store["alert_topic"] = (cfg.alert_topic or "").strip() or None
+    return {"ok": True}
+
+
+# ─────────────────────── inteligencia cruzada ───────────────────────
+@app.get("/v1/insights")
+def insights(org_token: str = Depends(require_org_token)) -> dict:
+    """**Intruso itinerante**: equipos NO confiables (unknown) cuya misma MAC
+    aparece en 2+ sedes. Solo posible con visión multi-sede — el diferenciador.
+    Requiere que esas sedes tengan inventario completo activado."""
+    now = _now()
+    # mac -> { name, sites:set, trust }
+    seen: dict[str, dict] = {}
+    with _LOCK:
+        org = _STORE.get(org_token, {})
+        for site_id, rec in org.items():
+            for d in (rec.get("devices") or []):
+                if d.get("trust") != "unknown":
+                    continue
+                mac = d.get("mac", "").upper()
+                if not mac:
+                    continue
+                entry = seen.setdefault(mac, {"name": d.get("name") or mac, "sites": set()})
+                entry["sites"].add(rec["site_name"])
+
+    roaming = [
+        {"mac": mac, "name": e["name"], "sites": sorted(e["sites"]), "site_count": len(e["sites"])}
+        for mac, e in seen.items()
+        if len(e["sites"]) >= 2
+    ]
+    roaming.sort(key=lambda r: -r["site_count"])
+    return {"roaming_unknowns": roaming, "generated_at": now.isoformat()}
+
+
+@app.get("/v1/inventory")
+def global_inventory(org_token: str = Depends(require_org_token)) -> dict:
+    """Inventario CONSOLIDADO: todos los equipos de todas las sedes (para buscar
+    un equipo across la organización / exportar). Requiere inventario por sede."""
+    out: list[dict] = []
+    with _LOCK:
+        org = _STORE.get(org_token, {})
+        for site_id, rec in org.items():
+            for d in (rec.get("devices") or []):
+                out.append({**d, "site_id": site_id, "site_name": rec["site_name"]})
+    out.sort(key=lambda d: (d["site_name"].lower(), 0 if d.get("online") else 1, (d.get("name") or "").lower()))
+    return {"devices": out, "total": len(out)}
