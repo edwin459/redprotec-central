@@ -37,6 +37,57 @@ _STORE: dict[str, dict[str, dict]] = {}
 _COMMANDS: dict[str, dict[str, list[dict]]] = {}
 # org_token -> { alert_topic }  (config de la organización)
 _ORG_CONFIG: dict[str, dict] = {}
+# org_token -> user_token -> { name, role, sites: list[str] | ["*"] }
+# RBAC en la NUBE: el dueño (org_token = raíz) reparte accesos por-persona con
+# rol + alcance de sedes. El relay es EN MEMORIA: la app admin re-sincroniza esta
+# lista al abrir (PUT /v1/access), así se restaura si el host reinicia. Si se
+# pierde, un token de usuario deja de resolver → falla CERRADO (seguro).
+_ACCESS: dict[str, dict[str, dict]] = {}
+
+# ─────────────────────── RBAC: roles y capacidades ───────────────────────
+# Espejo de mobile/lib/core/domain/access/roles.dart, recortado a las acciones
+# que existen en la NUBE (ver / comandos por sede). "*" = todas las capacidades.
+# view=ver sedes/inventario · block=bloquear/desbloquear · trust=confiar ·
+# rename=renombrar/responsable · panic=pánico. El ALCANCE (qué sedes) se aplica
+# aparte, por dispositivo/sede.
+_ROLE_CAPS: dict[str, set[str]] = {
+    "owner": {"*"},
+    "orgAdmin": {"*"},
+    "siteAdmin": {"*"},   # todo, pero LIMITADO por su alcance de sedes
+    "security": {"view", "block", "trust", "rename", "panic"},
+    "operator": {"view"},
+    "helpdesk": {"view", "rename"},
+    "family": {"view", "rename"},
+    "auditor": {"view"},
+    "guest": {"view"},
+}
+# Qué capacidad exige cada comando remoto.
+_CMD_CAP: dict[str, str] = {
+    "block": "block", "unblock": "block",
+    "trust": "trust", "rename": "rename", "set_owner": "rename",
+}
+_VALID_ROLES = set(_ROLE_CAPS)
+
+
+class Principal:
+    """Quién llama: una persona con rol+alcance, o el dueño (raíz)."""
+
+    __slots__ = ("org_token", "role", "sites", "is_master", "name")
+
+    def __init__(self, org_token: str, role: str, sites: list[str],
+                 is_master: bool, name: str | None = None):
+        self.org_token = org_token
+        self.role = role
+        self.sites = sites            # ["*"] = todas
+        self.is_master = is_master
+        self.name = name
+
+    def can(self, cap: str) -> bool:
+        caps = _ROLE_CAPS.get(self.role, set())
+        return "*" in caps or cap in caps
+
+    def sees_site(self, site_id: str) -> bool:
+        return self.sites == ["*"] or site_id in self.sites
 
 
 def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, tags: str) -> None:
@@ -157,6 +208,39 @@ def require_org_token(authorization: str | None = Header(default=None)) -> str:
     return token
 
 
+def _resolve_principal(token: str) -> Principal:
+    """Convierte un Bearer en un Principal.
+
+    Si el token está registrado como acceso de USUARIO (en `_ACCESS`), devuelve su
+    rol+alcance (acotado). Si NO, se trata como token MAESTRO de organización =
+    raíz (compat hacia atrás: los agentes y el dueño siguen usando el org_token).
+    Un token de usuario nunca puede escalar: si `_ACCESS` se perdió (reinicio del
+    relay), resolvería a un "org" vacío sin sedes → no ve ni controla nada.
+    """
+    with _LOCK:
+        for org_tok, users in _ACCESS.items():
+            u = users.get(token)
+            if u:
+                return Principal(
+                    org_tok, u.get("role", "guest"),
+                    list(u.get("sites") or ["*"]), False, u.get("name"),
+                )
+    return Principal(token, "owner", ["*"], True, "Administrador")
+
+
+def principal(authorization: str | None = Header(default=None)) -> Principal:
+    token = require_org_token(authorization)
+    return _resolve_principal(token)
+
+
+def require_master(p: Principal = Depends(principal)) -> Principal:
+    """Solo el dueño/raíz (org_token maestro): latidos del agente, config de la
+    organización y reparto de accesos. Un usuario acotado recibe 403."""
+    if not p.is_master:
+        raise HTTPException(status_code=403, detail="Requiere el token de administrador de la organización")
+    return p
+
+
 def _site_out(site_id: str, rec: dict, now: datetime) -> dict:
     delta = int((now - rec["updated_at"]).total_seconds())
     return {
@@ -181,8 +265,11 @@ def health() -> dict:
 
 
 @app.post("/v1/heartbeat")
-def heartbeat(hb: Heartbeat, org_token: str = Depends(require_org_token)) -> dict:
-    """El agente reporta su sede y recoge comandos pendientes en la respuesta."""
+def heartbeat(hb: Heartbeat, p: Principal = Depends(require_master)) -> dict:
+    """El agente reporta su sede y recoge comandos pendientes en la respuesta.
+    Solo el token MAESTRO (el agente lo tiene): un acceso de usuario no puede
+    inyectar sedes falsas."""
+    org_token = p.org_token
     now = _now()
     alert_topic = None
     alerts: list[tuple[str, str, str, str]] = []  # (title, msg, priority, tags)
@@ -293,12 +380,16 @@ def heartbeat(hb: Heartbeat, org_token: str = Depends(require_org_token)) -> dic
 
 
 @app.get("/v1/sites")
-def list_sites(org_token: str = Depends(require_org_token)) -> dict:
+def list_sites(p: Principal = Depends(principal)) -> dict:
+    """Sedes visibles para quien llama — filtradas a su ALCANCE (un gerente de
+    sede solo ve la suya; el dueño/auditor global las ve todas)."""
     now = _now()
     out: list[dict] = []
     with _LOCK:
-        org = _STORE.get(org_token, {})
+        org = _STORE.get(p.org_token, {})
         for site_id, rec in org.items():
+            if not p.sees_site(site_id):
+                continue
             out.append(_site_out(site_id, rec, now))
 
     def _severity(s: dict) -> tuple:
@@ -310,29 +401,44 @@ def list_sites(org_token: str = Depends(require_org_token)) -> dict:
         )
 
     out.sort(key=_severity)
-    return {"sites": out}
+    return {"sites": out, "role": p.role, "is_admin": p.is_master}
 
 
 @app.get("/v1/sites/{site_id}")
-def site_detail(site_id: str, org_token: str = Depends(require_org_token)) -> dict:
+def site_detail(site_id: str, p: Principal = Depends(principal)) -> dict:
     now = _now()
+    if not p.sees_site(site_id):
+        raise HTTPException(status_code=403, detail="Esta sede está fuera de tu alcance")
     with _LOCK:
-        rec = _STORE.get(org_token, {}).get(site_id)
+        rec = _STORE.get(p.org_token, {}).get(site_id)
         if not rec:
             raise HTTPException(status_code=404, detail="Sede no encontrada")
         base = _site_out(site_id, rec, now)
         base["devices"] = rec.get("devices") or []
+    base["role"] = p.role
+    base["can_command"] = p.sees_site(site_id) and (
+        p.can("block") or p.can("trust") or p.can("rename")
+    )
     return base
 
 
 @app.post("/v1/sites/{site_id}/commands")
 def enqueue_command(
-    site_id: str, cmd: CommandIn, org_token: str = Depends(require_org_token)
+    site_id: str, cmd: CommandIn, p: Principal = Depends(principal)
 ) -> dict:
-    """La app encola un comando; el agente lo recoge en su próximo latido."""
+    """La app encola un comando; el agente lo recoge en su próximo latido.
+    Exige la CAPACIDAD del rol para esa acción Y que la sede esté en su alcance."""
     now = _now()
+    cap = _CMD_CAP.get(cmd.action, cmd.action)
+    if not p.sees_site(site_id):
+        raise HTTPException(status_code=403, detail="Esta sede está fuera de tu alcance")
+    if not p.can(cap):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Tu rol ({p.role}) no puede ejecutar «{cmd.action}» a distancia",
+        )
     with _LOCK:
-        rec = _STORE.get(org_token, {}).get(site_id)
+        rec = _STORE.get(p.org_token, {}).get(site_id)
         if not rec:
             raise HTTPException(status_code=404, detail="Sede no encontrada")
         if not rec.get("remote_admin"):
@@ -347,7 +453,7 @@ def enqueue_command(
             "value": cmd.value,
             "created_at": now,
         }
-        _COMMANDS.setdefault(org_token, {}).setdefault(site_id, []).append(command)
+        _COMMANDS.setdefault(p.org_token, {}).setdefault(site_id, []).append(command)
     return {"ok": True, "command_id": command["id"]}
 
 
@@ -355,12 +461,12 @@ def enqueue_command(
 def ack_command(
     command_id: str,
     site_id: str = Header(default="", alias="X-Site-Id"),
-    org_token: str = Depends(require_org_token),
+    p: Principal = Depends(require_master),
 ) -> dict:
     """El agente confirma que ejecutó un comando; se retira de la cola."""
     with _LOCK:
-        q = _COMMANDS.get(org_token, {}).get(site_id, [])
-        _COMMANDS.setdefault(org_token, {})[site_id] = [
+        q = _COMMANDS.get(p.org_token, {}).get(site_id, [])
+        _COMMANDS.setdefault(p.org_token, {})[site_id] = [
             c for c in q if c["id"] != command_id
         ]
     return {"ok": True}
@@ -372,32 +478,35 @@ class OrgConfigIn(BaseModel):
 
 
 @app.get("/v1/org/config")
-def get_org_config(org_token: str = Depends(require_org_token)) -> dict:
+def get_org_config(p: Principal = Depends(require_master)) -> dict:
     with _LOCK:
-        cfg = dict(_ORG_CONFIG.get(org_token, {}))
+        cfg = dict(_ORG_CONFIG.get(p.org_token, {}))
     return {"alert_topic": cfg.get("alert_topic")}
 
 
 @app.post("/v1/org/config")
-def set_org_config(cfg: OrgConfigIn, org_token: str = Depends(require_org_token)) -> dict:
+def set_org_config(cfg: OrgConfigIn, p: Principal = Depends(require_master)) -> dict:
     with _LOCK:
-        store = _ORG_CONFIG.setdefault(org_token, {})
+        store = _ORG_CONFIG.setdefault(p.org_token, {})
         store["alert_topic"] = (cfg.alert_topic or "").strip() or None
     return {"ok": True}
 
 
 # ─────────────────────── inteligencia cruzada ───────────────────────
 @app.get("/v1/insights")
-def insights(org_token: str = Depends(require_org_token)) -> dict:
+def insights(p: Principal = Depends(principal)) -> dict:
     """**Intruso itinerante**: equipos NO confiables (unknown) cuya misma MAC
     aparece en 2+ sedes. Solo posible con visión multi-sede — el diferenciador.
-    Requiere que esas sedes tengan inventario completo activado."""
+    Requiere que esas sedes tengan inventario completo activado. Filtra a las
+    sedes del ALCANCE de quien llama (un intruso solo cuenta en sus sedes)."""
     now = _now()
     # mac -> { name, sites:set, trust }
     seen: dict[str, dict] = {}
     with _LOCK:
-        org = _STORE.get(org_token, {})
+        org = _STORE.get(p.org_token, {})
         for site_id, rec in org.items():
+            if not p.sees_site(site_id):
+                continue
             for d in (rec.get("devices") or []):
                 if d.get("trust") != "unknown":
                     continue
@@ -417,14 +526,64 @@ def insights(org_token: str = Depends(require_org_token)) -> dict:
 
 
 @app.get("/v1/inventory")
-def global_inventory(org_token: str = Depends(require_org_token)) -> dict:
-    """Inventario CONSOLIDADO: todos los equipos de todas las sedes (para buscar
-    un equipo across la organización / exportar). Requiere inventario por sede."""
+def global_inventory(p: Principal = Depends(principal)) -> dict:
+    """Inventario CONSOLIDADO: equipos de las sedes del ALCANCE de quien llama
+    (para buscar/exportar). Requiere inventario por sede."""
     out: list[dict] = []
     with _LOCK:
-        org = _STORE.get(org_token, {})
+        org = _STORE.get(p.org_token, {})
         for site_id, rec in org.items():
+            if not p.sees_site(site_id):
+                continue
             for d in (rec.get("devices") or []):
                 out.append({**d, "site_id": site_id, "site_name": rec["site_name"]})
     out.sort(key=lambda d: (d["site_name"].lower(), 0 if d.get("online") else 1, (d.get("name") or "").lower()))
     return {"devices": out, "total": len(out)}
+
+
+# ─────────────────────── RBAC: reparto de accesos (solo dueño) ───────────────────────
+class AccessUser(BaseModel):
+    token: str = Field(min_length=8, max_length=200)
+    name: str = Field(default="", max_length=120)
+    role: str = "guest"
+    sites: list[str] = Field(default_factory=lambda: ["*"])  # ["*"] = todas
+
+
+class AccessListIn(BaseModel):
+    users: list[AccessUser] = Field(default_factory=list)
+
+
+def _access_out(token: str, u: dict) -> dict:
+    return {
+        "token": token,
+        "name": u.get("name") or "",
+        "role": u.get("role") or "guest",
+        "sites": list(u.get("sites") or ["*"]),
+    }
+
+
+@app.get("/v1/access")
+def list_access(p: Principal = Depends(require_master)) -> dict:
+    """Lista los accesos por-persona de la organización (solo el dueño)."""
+    with _LOCK:
+        users = dict(_ACCESS.get(p.org_token, {}))
+    return {"users": [_access_out(t, u) for t, u in users.items()]}
+
+
+@app.put("/v1/access")
+def set_access(body: AccessListIn, p: Principal = Depends(require_master)) -> dict:
+    """**Reemplaza** la lista completa de accesos de la organización (solo el
+    dueño). La app admin es la fuente de verdad y re-sincroniza al abrir, así el
+    relay (en memoria) se restaura tras un reinicio. Idempotente."""
+    for u in body.users:
+        if u.role not in _VALID_ROLES:
+            raise HTTPException(status_code=400, detail=f"Rol inválido: {u.role}")
+        # No-escalada: nadie reparte 'owner' por aquí (queda reservado al maestro).
+        if u.role == "owner":
+            raise HTTPException(status_code=400, detail="No se puede conceder el rol de dueño")
+    with _LOCK:
+        _ACCESS[p.org_token] = {
+            u.token: {"name": u.name, "role": u.role, "sites": list(u.sites or ["*"])}
+            for u in body.users
+        }
+    return {"ok": True, "count": len(body.users)}
