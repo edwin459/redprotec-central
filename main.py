@@ -25,12 +25,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from auth import verify_supabase_jwt
 from store import create_store
 
-app = FastAPI(title="RedProtec Central Relay", version="0.6.0")
+app = FastAPI(title="RedProtec Central Relay", version="0.7.0")
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -368,6 +369,32 @@ def health() -> dict:
     (un arranque en frío lento hacía fallar el deploy). Los contadores van en
     ``/stats``."""
     return {"status": "ok", "version": app.version}
+
+
+# ─────────────────── Descarga del Agente (enlace estable) ───────────────────
+# La app y el sitio apuntan a {relay}/download; el destino real (GitHub Releases,
+# etc.) se cambia por entorno sin tocar clientes. AGENT_VERSION opcional para el
+# aviso de actualización.
+AGENT_DOWNLOAD_URL = os.environ.get("AGENT_DOWNLOAD_URL", "").strip()
+AGENT_VERSION = os.environ.get("AGENT_VERSION", "").strip()
+
+
+@app.get("/download")
+def download_agent() -> RedirectResponse:
+    """Redirige al instalador del Agente (Windows). 404 si aún no se configuró."""
+    if not AGENT_DOWNLOAD_URL:
+        raise HTTPException(status_code=404, detail="download_not_configured")
+    return RedirectResponse(AGENT_DOWNLOAD_URL, status_code=302)
+
+
+@app.get("/download/info")
+def download_info() -> dict:
+    """Metadatos de la descarga (para el botón/aviso de actualización del cliente)."""
+    return {
+        "available": bool(AGENT_DOWNLOAD_URL),
+        "version": AGENT_VERSION or None,
+        "url": AGENT_DOWNLOAD_URL or None,
+    }
 
 
 @app.get("/stats")

@@ -294,6 +294,24 @@ class CloudRbacTests(unittest.TestCase):
         # No se filtra inventario de equipos de ningún cliente.
         self.assertNotIn("devices_list", out["fleet"][0])
 
+    def test_download_info_not_configured_by_default(self):
+        main.AGENT_DOWNLOAD_URL = ""
+        info = main.download_info()
+        self.assertFalse(info["available"])
+        with self.assertRaises(HTTPException) as ctx:
+            main.download_agent()
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_download_redirects_when_configured(self):
+        main.AGENT_DOWNLOAD_URL = "https://example.com/RedProtecAgent-Setup.exe"
+        try:
+            resp = main.download_agent()
+            self.assertEqual(resp.status_code, 302)
+            self.assertEqual(resp.headers["location"], main.AGENT_DOWNLOAD_URL)
+            self.assertTrue(main.download_info()["available"])
+        finally:
+            main.AGENT_DOWNLOAD_URL = ""
+
     def test_admin_fleet_requires_admin_token(self):
         main.ADMIN_TOKEN = ""
         with self.assertRaises(HTTPException) as ctx:
