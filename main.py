@@ -18,6 +18,7 @@ cambia ninguna respuesta: los endpoints hablan solo con la interfaz `Store`.
 from __future__ import annotations
 
 import os
+import secrets
 import threading
 import urllib.request
 import uuid
@@ -250,6 +251,12 @@ def principal(authorization: str | None = Header(default=None)) -> Principal:
             str(claims["sub"]), "owner", ["*"], True,
             claims.get("email") or claims.get("name") or "Cuenta",
         )
+    # Auth-2: token de AGENTE (lo emite el relay al vincular una sede a una
+    # cuenta). Resuelve al `org_token` de la cuenta → el agente reporta como
+    # dueño de ESA organización, sin exponer credenciales adivinables.
+    agent_org = store.resolve_agent_token(token)
+    if agent_org:
+        return Principal(agent_org, "owner", ["*"], True, "Agente")
     return _resolve_principal(token)
 
 
@@ -595,3 +602,43 @@ def set_access(body: AccessListIn, p: Principal = Depends(require_master)) -> di
           "sites": list(u.sites or ["*"])} for u in body.users],
     )
     return {"ok": True, "count": len(body.users)}
+
+
+# ─────────────────── Auth-2: vincular una sede a una cuenta ───────────────────
+class AgentTokenIn(BaseModel):
+    label: str = Field(default="", max_length=120)  # nombre de la sede/PC
+
+
+@app.post("/v1/agent-tokens")
+def create_agent_token(
+    body: AgentTokenIn | None = None, p: Principal = Depends(require_master)
+) -> dict:
+    """Emite un token de AGENTE ligado a la organización de quien llama (su
+    cuenta). La app lo pide con la sesión iniciada y lo guarda en el agente para
+    que esa sede reporte a la cuenta. Solo el dueño/cuenta (token maestro)."""
+    token = "rp_agent_" + secrets.token_urlsafe(24)
+    label = (body.label if body else "") or "Sede"
+    store.create_agent_token(p.org_token, token, label, _now())
+    return {"ok": True, "token": token, "label": label}
+
+
+@app.get("/v1/agent-tokens")
+def list_agent_tokens(p: Principal = Depends(require_master)) -> dict:
+    """Lista las sedes vinculadas a la cuenta (sin revelar el token completo)."""
+    out = []
+    for t in store.list_agent_tokens(p.org_token):
+        tok = t.get("token", "")
+        created = t.get("created_at")
+        out.append({
+            "token_hint": (tok[-6:] if tok else ""),
+            "label": t.get("label", ""),
+            "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
+        })
+    return {"agents": out}
+
+
+@app.delete("/v1/agent-tokens/{token}")
+def revoke_agent_token(token: str, p: Principal = Depends(require_master)) -> dict:
+    """Revoca (desvincula) un token de agente de la cuenta."""
+    store.revoke_agent_token(p.org_token, token)
+    return {"ok": True}

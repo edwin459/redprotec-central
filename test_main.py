@@ -28,6 +28,8 @@ class CloudRbacTests(unittest.TestCase):
         main._COMMANDS.clear()
         main._ORG_CONFIG.clear()
         main._ACCESS.clear()
+        if hasattr(main.store, "_agent_tokens"):
+            main.store._agent_tokens.clear()
         self.org = "org-master-token-1234"
         _seed_site(self.org, "bogota", "Bogotá")
         _seed_site(self.org, "medellin", "Medellín")
@@ -197,6 +199,49 @@ class CloudRbacTests(unittest.TestCase):
         # Y un latido de esa sede tampoco entrega comandos.
         hb = main.Heartbeat(site_id="cali", site_name="Cali", remote_admin=False)
         self.assertEqual(main.heartbeat(hb, p=master)["commands"], [])
+
+    # ── Auth-2: vincular una sede a una cuenta ──────────────────────────
+    def test_agent_token_links_site_to_account_org(self):
+        """La app (dueño de una cuenta = org) emite un token de agente; el agente
+        que reporta con ese token queda en LA MISMA organización → sus sedes se
+        ven bajo esa cuenta."""
+        account = "cuenta-uuid-del-usuario-A"
+        acc_p = main._resolve_principal(account)  # simula el principal de la cuenta
+        # 1) La cuenta emite un token de agente.
+        out = main.create_agent_token(main.AgentTokenIn(label="Casa"), p=acc_p)
+        agent_token = out["token"]
+        self.assertTrue(agent_token.startswith("rp_agent_"))
+        # 2) principal() resuelve ese token a la MISMA org que la cuenta.
+        p_agent = main.principal(authorization=f"Bearer {agent_token}")
+        self.assertTrue(p_agent.is_master)
+        self.assertEqual(p_agent.org_token, account)
+        # 3) El agente late → la sede queda bajo la org de la cuenta.
+        hb = main.Heartbeat(site_id="pc-casa", site_name="Casa", remote_admin=True)
+        main.heartbeat(hb, p=p_agent)
+        sites = main.list_sites(p=acc_p)["sites"]
+        self.assertEqual([s["site_id"] for s in sites], ["pc-casa"])
+
+    def test_agent_token_isolated_per_account(self):
+        a = main._resolve_principal("cuenta-A")
+        b = main._resolve_principal("cuenta-B")
+        tok_a = main.create_agent_token(main.AgentTokenIn(label="A"), p=a)["token"]
+        # El token de A resuelve a la org de A, no a la de B.
+        pa = main.principal(authorization=f"Bearer {tok_a}")
+        self.assertEqual(pa.org_token, "cuenta-A")
+        # B no ve ese token en su lista.
+        self.assertEqual(main.list_agent_tokens(p=b)["agents"], [])
+        listed = main.list_agent_tokens(p=a)["agents"]
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["label"], "A")
+
+    def test_agent_token_revoke(self):
+        a = main._resolve_principal("cuenta-A")
+        tok = main.create_agent_token(main.AgentTokenIn(label="A"), p=a)["token"]
+        main.revoke_agent_token(tok, p=a)
+        # Ya no resuelve a la org de la cuenta (cae al modelo opaco = su propio token).
+        p_after = main.principal(authorization=f"Bearer {tok}")
+        self.assertEqual(p_after.org_token, tok)  # opaco: org keyed por el token
+        self.assertEqual(main.list_agent_tokens(p=a)["agents"], [])
 
 
 if __name__ == "__main__":

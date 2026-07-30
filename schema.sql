@@ -53,3 +53,15 @@ CREATE TABLE IF NOT EXISTS access (
     PRIMARY KEY (org_token, user_token)
 );
 CREATE INDEX IF NOT EXISTS access_user_idx ON access (user_token);
+
+-- Auth-2: tokens de AGENTE. Cuando un cliente (con su cuenta de Supabase)
+-- vincula la sede de un PC a su cuenta, el relay emite un token aleatorio y lo
+-- mapea a su organización (el `sub` del usuario). El agente reporta con ese
+-- token; el relay lo resuelve al `org_token` de la cuenta. Revocable.
+CREATE TABLE IF NOT EXISTS agent_tokens (
+    token      text        PRIMARY KEY,
+    org_token  text        NOT NULL,
+    label      text        NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_tokens_org_idx ON agent_tokens (org_token);

@@ -67,6 +67,13 @@ class Store(Protocol):
     def list_access(self, org: str) -> dict[str, dict]: ...
     def set_access(self, org: str, users: list[dict]) -> None: ...
 
+    # tokens de agente (Auth-2: vincular una sede a una cuenta)
+    def create_agent_token(self, org: str, token: str, label: str,
+                           created_at: datetime) -> None: ...
+    def resolve_agent_token(self, token: str) -> str | None: ...
+    def list_agent_tokens(self, org: str) -> list[dict]: ...
+    def revoke_agent_token(self, org: str, token: str) -> None: ...
+
 
 # ─────────────────────────── memoria ───────────────────────────
 class MemoryStore:
@@ -80,6 +87,7 @@ class MemoryStore:
         self._commands = commands    # org -> site_id -> list[command]
         self._org_config = org_config  # org -> {alert_topic}
         self._access = access        # org -> user_token -> {name, role, sites}
+        self._agent_tokens: dict[str, dict] = {}  # token -> {org, label, created_at}
         self._lock = lock or threading.Lock()
 
     def stats(self) -> tuple[int, int]:
@@ -159,6 +167,30 @@ class MemoryStore:
                 for u in users
             }
 
+    def create_agent_token(self, org, token, label, created_at) -> None:
+        with self._lock:
+            self._agent_tokens[token] = {
+                "org": org, "label": label, "created_at": created_at}
+
+    def resolve_agent_token(self, token: str) -> str | None:
+        with self._lock:
+            rec = self._agent_tokens.get(token)
+            return rec["org"] if rec else None
+
+    def list_agent_tokens(self, org: str) -> list[dict]:
+        with self._lock:
+            return [
+                {"token": t, "label": r.get("label", ""),
+                 "created_at": r.get("created_at")}
+                for t, r in self._agent_tokens.items() if r.get("org") == org
+            ]
+
+    def revoke_agent_token(self, org: str, token: str) -> None:
+        with self._lock:
+            rec = self._agent_tokens.get(token)
+            if rec and rec.get("org") == org:
+                del self._agent_tokens[token]
+
 
 # ─────────────────────────── postgres ───────────────────────────
 SCHEMA_SQL = """
@@ -199,6 +231,14 @@ CREATE TABLE IF NOT EXISTS access (
     PRIMARY KEY (org_token, user_token)
 );
 CREATE INDEX IF NOT EXISTS access_user_idx ON access (user_token);
+
+CREATE TABLE IF NOT EXISTS agent_tokens (
+    token      text        PRIMARY KEY,
+    org_token  text        NOT NULL,
+    label      text        NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_tokens_org_idx ON agent_tokens (org_token);
 """
 
 
@@ -418,6 +458,36 @@ class PostgresStore:
                     (org, u["token"], u.get("name", ""), u.get("role", "guest"),
                      self._Json(list(u.get("sites") or ["*"]))),
                 )
+
+    # ── tokens de agente ──
+    def create_agent_token(self, org, token, label, created_at) -> None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_tokens (token, org_token, label, created_at) "
+                "VALUES (%s, %s, %s, %s)",
+                (token, org, label, created_at),
+            )
+
+    def resolve_agent_token(self, token: str) -> str | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT org_token FROM agent_tokens WHERE token = %s", (token,))
+            row = cur.fetchone()
+        return row[0] if row else None
+
+    def list_agent_tokens(self, org: str) -> list[dict]:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT token, label, created_at FROM agent_tokens "
+                "WHERE org_token = %s ORDER BY created_at", (org,))
+            rows = cur.fetchall()
+        return [{"token": r[0], "label": r[1], "created_at": r[2]} for r in rows]
+
+    def revoke_agent_token(self, org: str, token: str) -> None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM agent_tokens WHERE org_token = %s AND token = %s",
+                (org, token))
 
 
 # ─────────────────────────── selección ───────────────────────────
