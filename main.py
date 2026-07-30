@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from auth import verify_supabase_jwt
 from store import create_store
 
-app = FastAPI(title="RedProtec Central Relay", version="0.4.0")
+app = FastAPI(title="RedProtec Central Relay", version="0.5.0")
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
