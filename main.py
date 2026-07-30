@@ -7,9 +7,12 @@ app lee todas las sedes, entra al detalle de una y puede ENVIAR COMANDOS
 ejecuta localmente — así se administra a distancia aunque el agente esté detrás
 de NAT.
 
-Diseño para free tier: estado EN MEMORIA (sin base de datos). Si el host
-reinicia, las sedes se re-registran solas en el siguiente latido. Multi-tenant
-por `org_token` (Authorization: Bearer). Migración a pago = cambiar el almacén.
+Almacén intercambiable (ver store.py): si la variable de entorno DATABASE_URL
+está definida, el estado se guarda en Postgres (Supabase) y sobrevive reinicios
+— escala a miles de sedes/usuarios. Si NO, se usa el almacén EN MEMORIA de
+siempre (fallback gratis: las sedes se re-registran solas en el próximo latido).
+Multi-tenant por `org_token` (Authorization: Bearer). Cambiar de backend NO
+cambia ninguna respuesta: los endpoints hablan solo con la interfaz `Store`.
 """
 
 from __future__ import annotations
@@ -23,7 +26,9 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="RedProtec Central Relay", version="0.3.0")
+from store import create_store
+
+app = FastAPI(title="RedProtec Central Relay", version="0.4.0")
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -43,6 +48,12 @@ _ORG_CONFIG: dict[str, dict] = {}
 # lista al abrir (PUT /v1/access), así se restaura si el host reinicia. Si se
 # pierde, un token de usuario deja de resolver → falla CERRADO (seguro).
 _ACCESS: dict[str, dict[str, dict]] = {}
+
+# Almacén activo. Con DATABASE_URL → Postgres (Supabase, persistente). Sin ella →
+# MemoryStore sobre LOS MISMOS dicts de arriba (fallback gratis + tests). Los
+# endpoints usan `store.*`; los dicts quedan como respaldo en memoria y para que
+# los tests que los tocan directamente sigan funcionando igual.
+store = create_store(_STORE, _COMMANDS, _ORG_CONFIG, _ACCESS, _LOCK)
 
 # ─────────────────────── RBAC: roles y capacidades ───────────────────────
 # Espejo de mobile/lib/core/domain/access/roles.dart, recortado a las acciones
@@ -217,14 +228,13 @@ def _resolve_principal(token: str) -> Principal:
     Un token de usuario nunca puede escalar: si `_ACCESS` se perdió (reinicio del
     relay), resolvería a un "org" vacío sin sedes → no ve ni controla nada.
     """
-    with _LOCK:
-        for org_tok, users in _ACCESS.items():
-            u = users.get(token)
-            if u:
-                return Principal(
-                    org_tok, u.get("role", "guest"),
-                    list(u.get("sites") or ["*"]), False, u.get("name"),
-                )
+    found = store.resolve_user(token)
+    if found:
+        org_tok, u = found
+        return Principal(
+            org_tok, u.get("role", "guest"),
+            list(u.get("sites") or ["*"]), False, u.get("name"),
+        )
     return Principal(token, "owner", ["*"], True, "Administrador")
 
 
@@ -258,9 +268,7 @@ def _site_out(site_id: str, rec: dict, now: datetime) -> dict:
 # ─────────────────────────── endpoints ───────────────────────────
 @app.get("/health")
 def health() -> dict:
-    with _LOCK:
-        orgs = len(_STORE)
-        sites = sum(len(v) for v in _STORE.values())
+    orgs, sites = store.stats()
     return {"status": "ok", "version": app.version, "orgs": orgs, "sites": sites}
 
 
@@ -273,106 +281,98 @@ def heartbeat(hb: Heartbeat, p: Principal = Depends(require_master)) -> dict:
     now = _now()
     alert_topic = None
     alerts: list[tuple[str, str, str, str]] = []  # (title, msg, priority, tags)
-    with _LOCK:
-        org = _STORE.setdefault(org_token, {})
-        prev = org.get(hb.site_id)
-        new_summary = hb.summary.model_dump()
-        new_devices = (
-            [d.model_dump() for d in hb.devices] if hb.devices is not None else None
-        )
-        prev_devices = (prev or {}).get("devices")
 
-        # ── Alertas por sede: avisar al dueño en las TRANSICIONES a peor ──
-        # Si hay inventario, se IDENTIFICA el equipo culpable (nombre/IP/MAC);
-        # si no, se cae a un mensaje genérico por conteo.
-        if prev is not None:
-            ps = prev["summary"]
-            when = now.strftime("%d/%m %H:%M UTC")
+    prev = store.get_site(org_token, hb.site_id)
+    new_summary = hb.summary.model_dump()
+    new_devices = (
+        [d.model_dump() for d in hb.devices] if hb.devices is not None else None
+    )
+    prev_devices = (prev or {}).get("devices")
 
-            if new_summary["alerts"] > ps.get("alerts", 0):
-                inv = new_devices if new_devices is not None else prev_devices
-                culprit_macs = _unknown_macs(new_devices) - _unknown_macs(prev_devices)
-                culprits = [
-                    d for d in (inv or [])
-                    if (d.get("mac") or "").upper() in culprit_macs
-                ]
-                if culprits:
-                    if len(culprits) == 1:
-                        body = (
-                            f"🚨 Equipo sin identificar en «{hb.site_name}»\n\n"
-                            f"{_fmt_device(culprits[0])}\n"
-                            f"• Detectado: {when}\n\n"
-                            f"Ábrelo en el panel para bloquearlo o marcarlo confiable."
-                        )
-                    else:
-                        listado = "\n".join(
-                            f"• {d.get('name') or d.get('mac')} "
-                            f"({d.get('ip') or '—'} · {d.get('mac')})"
-                            for d in culprits[:6]
-                        )
-                        body = (
-                            f"🚨 {len(culprits)} equipos sin identificar en "
-                            f"«{hb.site_name}»\n\n{listado}\n\nRevísalos en el panel."
-                        )
-                else:
-                    body = (
-                        f"🚨 Apareció un equipo desconocido en «{hb.site_name}».\n"
-                        f"Activa «Inventario completo» en esa sede para ver "
-                        f"nombre, IP y MAC aquí."
-                    )
-                alerts.append((
-                    f"RedProtec — {hb.site_name}: equipo desconocido",
-                    body, "high", "warning",
-                ))
+    # ── Alertas por sede: avisar al dueño en las TRANSICIONES a peor ──
+    # Si hay inventario, se IDENTIFICA el equipo culpable (nombre/IP/MAC);
+    # si no, se cae a un mensaje genérico por conteo.
+    if prev is not None:
+        ps = prev["summary"]
+        when = now.strftime("%d/%m %H:%M UTC")
 
-            if new_summary["criticals_down"] > ps.get("criticals_down", 0):
-                prev_down = _down_criticals(prev_devices)
-                cur_down = _down_criticals(new_devices)
-                newly_down = [
-                    cur_down[m] for m in (set(cur_down) - set(prev_down))
-                ] if new_devices is not None else []
-                if newly_down:
-                    d = newly_down[0]
-                    extra = (
-                        f"\n(y {len(newly_down) - 1} más)" if len(newly_down) > 1 else ""
-                    )
-                    body = (
-                        f"🔴 Activo crítico sin responder en «{hb.site_name}»\n\n"
-                        f"{_fmt_device(d)}\n"
-                        f"• Estado: sin responder desde {when}{extra}\n\n"
-                        f"Revisa la sede: el equipo dejó de estar en línea."
-                    )
-                else:
-                    body = (
-                        f"🔴 Un activo crítico dejó de responder en «{hb.site_name}».\n"
-                        f"Activa «Inventario completo» en esa sede para ver el detalle."
-                    )
-                alerts.append((
-                    f"RedProtec — {hb.site_name}: activo crítico caído",
-                    body, "high", "rotating_light",
-                ))
-
-        org[hb.site_id] = {
-            "site_name": hb.site_name,
-            "summary": new_summary,
-            "devices": new_devices if new_devices is not None else prev_devices,
-            "remote_admin": hb.remote_admin,
-            "updated_at": now,
-        }
-        if alerts:
-            alert_topic = _ORG_CONFIG.get(org_token, {}).get("alert_topic")
-
-        pending: list[dict] = []
-        if hb.remote_admin:
-            q = _COMMANDS.get(org_token, {}).get(hb.site_id, [])
-            fresh = [c for c in q if (now - c["created_at"]).total_seconds() <= COMMAND_TTL_SECONDS]
-            _COMMANDS.setdefault(org_token, {})[hb.site_id] = fresh
-            pending = [
-                {"id": c["id"], "action": c["action"], "mac": c["mac"], "value": c.get("value")}
-                for c in fresh
+        if new_summary["alerts"] > ps.get("alerts", 0):
+            inv = new_devices if new_devices is not None else prev_devices
+            culprit_macs = _unknown_macs(new_devices) - _unknown_macs(prev_devices)
+            culprits = [
+                d for d in (inv or [])
+                if (d.get("mac") or "").upper() in culprit_macs
             ]
+            if culprits:
+                if len(culprits) == 1:
+                    body = (
+                        f"🚨 Equipo sin identificar en «{hb.site_name}»\n\n"
+                        f"{_fmt_device(culprits[0])}\n"
+                        f"• Detectado: {when}\n\n"
+                        f"Ábrelo en el panel para bloquearlo o marcarlo confiable."
+                    )
+                else:
+                    listado = "\n".join(
+                        f"• {d.get('name') or d.get('mac')} "
+                        f"({d.get('ip') or '—'} · {d.get('mac')})"
+                        for d in culprits[:6]
+                    )
+                    body = (
+                        f"🚨 {len(culprits)} equipos sin identificar en "
+                        f"«{hb.site_name}»\n\n{listado}\n\nRevísalos en el panel."
+                    )
+            else:
+                body = (
+                    f"🚨 Apareció un equipo desconocido en «{hb.site_name}».\n"
+                    f"Activa «Inventario completo» en esa sede para ver "
+                    f"nombre, IP y MAC aquí."
+                )
+            alerts.append((
+                f"RedProtec — {hb.site_name}: equipo desconocido",
+                body, "high", "warning",
+            ))
 
-    # Enviar pushes fuera del lock (I/O de red).
+        if new_summary["criticals_down"] > ps.get("criticals_down", 0):
+            prev_down = _down_criticals(prev_devices)
+            cur_down = _down_criticals(new_devices)
+            newly_down = [
+                cur_down[m] for m in (set(cur_down) - set(prev_down))
+            ] if new_devices is not None else []
+            if newly_down:
+                d = newly_down[0]
+                extra = (
+                    f"\n(y {len(newly_down) - 1} más)" if len(newly_down) > 1 else ""
+                )
+                body = (
+                    f"🔴 Activo crítico sin responder en «{hb.site_name}»\n\n"
+                    f"{_fmt_device(d)}\n"
+                    f"• Estado: sin responder desde {when}{extra}\n\n"
+                    f"Revisa la sede: el equipo dejó de estar en línea."
+                )
+            else:
+                body = (
+                    f"🔴 Un activo crítico dejó de responder en «{hb.site_name}».\n"
+                    f"Activa «Inventario completo» en esa sede para ver el detalle."
+                )
+            alerts.append((
+                f"RedProtec — {hb.site_name}: activo crítico caído",
+                body, "high", "rotating_light",
+            ))
+
+    store.upsert_site(
+        org_token, hb.site_id, hb.site_name, new_summary,
+        new_devices if new_devices is not None else prev_devices,
+        hb.remote_admin, now,
+    )
+    if alerts:
+        alert_topic = store.get_org_config(org_token).get("alert_topic")
+
+    pending: list[dict] = []
+    if hb.remote_admin:
+        pending = store.pending_commands(
+            org_token, hb.site_id, COMMAND_TTL_SECONDS, now)
+
+    # Enviar pushes fuera de cualquier candado (I/O de red).
     for title, msg, prio, tags in alerts:
         _push_ntfy(alert_topic, title, msg, priority=prio, tags=tags)
 
@@ -385,12 +385,10 @@ def list_sites(p: Principal = Depends(principal)) -> dict:
     sede solo ve la suya; el dueño/auditor global las ve todas)."""
     now = _now()
     out: list[dict] = []
-    with _LOCK:
-        org = _STORE.get(p.org_token, {})
-        for site_id, rec in org.items():
-            if not p.sees_site(site_id):
-                continue
-            out.append(_site_out(site_id, rec, now))
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        out.append(_site_out(site_id, rec, now))
 
     def _severity(s: dict) -> tuple:
         return (
@@ -409,12 +407,11 @@ def site_detail(site_id: str, p: Principal = Depends(principal)) -> dict:
     now = _now()
     if not p.sees_site(site_id):
         raise HTTPException(status_code=403, detail="Esta sede está fuera de tu alcance")
-    with _LOCK:
-        rec = _STORE.get(p.org_token, {}).get(site_id)
-        if not rec:
-            raise HTTPException(status_code=404, detail="Sede no encontrada")
-        base = _site_out(site_id, rec, now)
-        base["devices"] = rec.get("devices") or []
+    rec = store.get_site(p.org_token, site_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Sede no encontrada")
+    base = _site_out(site_id, rec, now)
+    base["devices"] = rec.get("devices") or []
     base["role"] = p.role
     base["can_command"] = p.sees_site(site_id) and (
         p.can("block") or p.can("trust") or p.can("rename")
@@ -437,23 +434,22 @@ def enqueue_command(
             status_code=403,
             detail=f"Tu rol ({p.role}) no puede ejecutar «{cmd.action}» a distancia",
         )
-    with _LOCK:
-        rec = _STORE.get(p.org_token, {}).get(site_id)
-        if not rec:
-            raise HTTPException(status_code=404, detail="Sede no encontrada")
-        if not rec.get("remote_admin"):
-            raise HTTPException(
-                status_code=403,
-                detail="Esta sede no permite administración remota",
-            )
-        command = {
-            "id": uuid.uuid4().hex[:12],
-            "action": cmd.action,
-            "mac": cmd.mac,
-            "value": cmd.value,
-            "created_at": now,
-        }
-        _COMMANDS.setdefault(p.org_token, {}).setdefault(site_id, []).append(command)
+    rec = store.get_site(p.org_token, site_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Sede no encontrada")
+    if not rec.get("remote_admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Esta sede no permite administración remota",
+        )
+    command = {
+        "id": uuid.uuid4().hex[:12],
+        "action": cmd.action,
+        "mac": cmd.mac,
+        "value": cmd.value,
+        "created_at": now,
+    }
+    store.enqueue_command(p.org_token, site_id, command)
     return {"ok": True, "command_id": command["id"]}
 
 
@@ -464,11 +460,7 @@ def ack_command(
     p: Principal = Depends(require_master),
 ) -> dict:
     """El agente confirma que ejecutó un comando; se retira de la cola."""
-    with _LOCK:
-        q = _COMMANDS.get(p.org_token, {}).get(site_id, [])
-        _COMMANDS.setdefault(p.org_token, {})[site_id] = [
-            c for c in q if c["id"] != command_id
-        ]
+    store.ack_command(p.org_token, site_id, command_id)
     return {"ok": True}
 
 
@@ -479,16 +471,13 @@ class OrgConfigIn(BaseModel):
 
 @app.get("/v1/org/config")
 def get_org_config(p: Principal = Depends(require_master)) -> dict:
-    with _LOCK:
-        cfg = dict(_ORG_CONFIG.get(p.org_token, {}))
+    cfg = store.get_org_config(p.org_token)
     return {"alert_topic": cfg.get("alert_topic")}
 
 
 @app.post("/v1/org/config")
 def set_org_config(cfg: OrgConfigIn, p: Principal = Depends(require_master)) -> dict:
-    with _LOCK:
-        store = _ORG_CONFIG.setdefault(p.org_token, {})
-        store["alert_topic"] = (cfg.alert_topic or "").strip() or None
+    store.set_alert_topic(p.org_token, (cfg.alert_topic or "").strip() or None)
     return {"ok": True}
 
 
@@ -502,19 +491,17 @@ def insights(p: Principal = Depends(principal)) -> dict:
     now = _now()
     # mac -> { name, sites:set, trust }
     seen: dict[str, dict] = {}
-    with _LOCK:
-        org = _STORE.get(p.org_token, {})
-        for site_id, rec in org.items():
-            if not p.sees_site(site_id):
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        for d in (rec.get("devices") or []):
+            if d.get("trust") != "unknown":
                 continue
-            for d in (rec.get("devices") or []):
-                if d.get("trust") != "unknown":
-                    continue
-                mac = d.get("mac", "").upper()
-                if not mac:
-                    continue
-                entry = seen.setdefault(mac, {"name": d.get("name") or mac, "sites": set()})
-                entry["sites"].add(rec["site_name"])
+            mac = d.get("mac", "").upper()
+            if not mac:
+                continue
+            entry = seen.setdefault(mac, {"name": d.get("name") or mac, "sites": set()})
+            entry["sites"].add(rec["site_name"])
 
     roaming = [
         {"mac": mac, "name": e["name"], "sites": sorted(e["sites"]), "site_count": len(e["sites"])}
@@ -530,13 +517,11 @@ def global_inventory(p: Principal = Depends(principal)) -> dict:
     """Inventario CONSOLIDADO: equipos de las sedes del ALCANCE de quien llama
     (para buscar/exportar). Requiere inventario por sede."""
     out: list[dict] = []
-    with _LOCK:
-        org = _STORE.get(p.org_token, {})
-        for site_id, rec in org.items():
-            if not p.sees_site(site_id):
-                continue
-            for d in (rec.get("devices") or []):
-                out.append({**d, "site_id": site_id, "site_name": rec["site_name"]})
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        for d in (rec.get("devices") or []):
+            out.append({**d, "site_id": site_id, "site_name": rec["site_name"]})
     out.sort(key=lambda d: (d["site_name"].lower(), 0 if d.get("online") else 1, (d.get("name") or "").lower()))
     return {"devices": out, "total": len(out)}
 
@@ -565,8 +550,7 @@ def _access_out(token: str, u: dict) -> dict:
 @app.get("/v1/access")
 def list_access(p: Principal = Depends(require_master)) -> dict:
     """Lista los accesos por-persona de la organización (solo el dueño)."""
-    with _LOCK:
-        users = dict(_ACCESS.get(p.org_token, {}))
+    users = store.list_access(p.org_token)
     return {"users": [_access_out(t, u) for t, u in users.items()]}
 
 
@@ -581,9 +565,9 @@ def set_access(body: AccessListIn, p: Principal = Depends(require_master)) -> di
         # No-escalada: nadie reparte 'owner' por aquí (queda reservado al maestro).
         if u.role == "owner":
             raise HTTPException(status_code=400, detail="No se puede conceder el rol de dueño")
-    with _LOCK:
-        _ACCESS[p.org_token] = {
-            u.token: {"name": u.name, "role": u.role, "sites": list(u.sites or ["*"])}
-            for u in body.users
-        }
+    store.set_access(
+        p.org_token,
+        [{"token": u.token, "name": u.name, "role": u.role,
+          "sites": list(u.sites or ["*"])} for u in body.users],
+    )
     return {"ok": True, "count": len(body.users)}

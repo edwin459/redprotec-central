@@ -1,8 +1,16 @@
 # RedProtec — Relay central Multi-sede (MVP)
 
-Servicio mínimo al que cada agente (sede) manda un **resumen** y desde el que la
-app lee todas las sedes. Sin base de datos (estado en memoria); las sedes se
-re-registran solas en cada latido. Pensado para **free tier**.
+Servicio al que cada agente (sede) manda un **resumen** y desde el que la app lee
+todas las sedes.
+
+**Almacén intercambiable** (`store.py`):
+- **Sin `DATABASE_URL`** → estado en memoria (free tier); las sedes se
+  re-registran solas en cada latido. Bueno para probar.
+- **Con `DATABASE_URL`** → **Postgres (Supabase)**: el estado PERSISTE entre
+  reinicios y deja de vivir en RAM → escala a miles de sedes/usuarios. Es el modo
+  de producción. **Los endpoints y las respuestas son idénticos** en ambos modos.
+
+Para el paso a producción (Supabase + host always-on) ver **[DEPLOY.md](DEPLOY.md)**.
 
 ## Qué expone
 - `GET /health` — estado.
@@ -45,6 +53,13 @@ Requisito: una cuenta en https://fly.io (el free allowance basta para probar).
 Solo viaja el **resumen** (nº de equipos, en línea, alertas, críticos). Nunca
 IPs, MACs ni nombres de equipos individuales.
 
-## Migrar a pago (después)
-Misma API. Solo se cambia el almacén (memoria → Postgres) y el host. El agente y
-la app **no cambian** — apuntas la app/agente a la nueva URL y listo.
+## Producción: Postgres persistente (Supabase) + host always-on
+Ya implementado. Se define la variable de entorno `DATABASE_URL` con la cadena de
+conexión de Postgres y el relay usa Postgres automáticamente (crea sus tablas
+solo). Misma API: el agente y la app **no cambian** — apuntas a la nueva URL.
+
+Guía paso a paso (crear el proyecto Supabase, obtener `DATABASE_URL`, desplegar en
+Railway, verificar): **[DEPLOY.md](DEPLOY.md)**.
+
+> Las credenciales van SIEMPRE en variables de entorno del host, **nunca** en el
+> repositorio ni en texto plano.

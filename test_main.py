@@ -152,6 +152,52 @@ class CloudRbacTests(unittest.TestCase):
         tokens = {u["token"] for u in main.list_access(p=master)["users"]}
         self.assertEqual(tokens, {"new-tok-0002"})  # 'old' fue revocado al reemplazar
 
+    # ── Viaje completo de un comando remoto (la garantía del control remoto) ──
+    def test_command_roundtrip_heartbeat_to_ack(self):
+        """app encola → el agente lo RECIBE en su latido → lo confirma → se va.
+
+        Es el flujo exacto que corre el relay desplegado: prueba que un comando
+        de la app llega al agente y no se re-ejecuta tras el ack."""
+        master = main._resolve_principal(self.org)
+
+        # 1) El agente late (permite admin remota) y reporta su sede.
+        hb = main.Heartbeat(site_id="bogota", site_name="Bogotá", remote_admin=True)
+        r0 = main.heartbeat(hb, p=master)
+        self.assertEqual(r0["commands"], [])  # aún no hay nada encolado
+
+        # 2) La app encola un bloqueo.
+        enq = main.enqueue_command(
+            "bogota", main.CommandIn(action="block", mac="AA:BB:CC"), p=master)
+        self.assertTrue(enq["ok"])
+        cmd_id = enq["command_id"]
+
+        # 3) El agente vuelve a latir → RECIBE el comando.
+        r1 = main.heartbeat(hb, p=master)
+        self.assertEqual([c["id"] for c in r1["commands"]], [cmd_id])
+        self.assertEqual(r1["commands"][0]["action"], "block")
+        self.assertEqual(r1["commands"][0]["mac"], "AA:BB:CC")
+
+        # 4) El agente confirma (ack) el comando ejecutado.
+        main.ack_command(cmd_id, site_id="bogota", p=master)
+
+        # 5) El siguiente latido ya NO trae el comando (no se re-ejecuta).
+        r2 = main.heartbeat(hb, p=master)
+        self.assertEqual(r2["commands"], [])
+
+    def test_remote_admin_off_delivers_no_commands(self):
+        """Una sede que NO permite admin remota no recibe comandos aunque existan
+        (defensa en profundidad del opt-in por sede)."""
+        _seed_site(self.org, "cali", "Cali", remote_admin=False)
+        master = main._resolve_principal(self.org)
+        # Encolar exige remote_admin en la sede → aquí ni siquiera deja encolar.
+        with self.assertRaises(HTTPException) as ctx:
+            main.enqueue_command(
+                "cali", main.CommandIn(action="block", mac="AA:BB"), p=master)
+        self.assertEqual(ctx.exception.status_code, 403)
+        # Y un latido de esa sede tampoco entrega comandos.
+        hb = main.Heartbeat(site_id="cali", site_name="Cali", remote_admin=False)
+        self.assertEqual(main.heartbeat(hb, p=master)["commands"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
