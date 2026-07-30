@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from auth import verify_supabase_jwt
 from store import create_store
 
 app = FastAPI(title="RedProtec Central Relay", version="0.4.0")
@@ -240,6 +241,15 @@ def _resolve_principal(token: str) -> Principal:
 
 def principal(authorization: str | None = Header(default=None)) -> Principal:
     token = require_org_token(authorization)
+    # SaaS (Auth-1): si el Bearer es un login válido de Supabase, la identidad es
+    # el usuario (claim `sub`) → dueño de SU PROPIA organización, aislada. Si no
+    # (token opaco o Supabase no configurado), se usa el modelo de siempre.
+    claims = verify_supabase_jwt(token)
+    if claims and claims.get("sub"):
+        return Principal(
+            str(claims["sub"]), "owner", ["*"], True,
+            claims.get("email") or claims.get("name") or "Cuenta",
+        )
     return _resolve_principal(token)
 
 

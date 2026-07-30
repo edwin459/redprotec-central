@@ -5,3 +5,7 @@ pydantic==2.10.4
 # Sin esa variable el relay corre en memoria y estas libs quedan inertes.
 psycopg[binary]==3.2.3
 psycopg-pool==3.2.4
+# Verificación del login de Supabase (SaaS Auth-1). Sin SUPABASE_JWT_SECRET /
+# SUPABASE_URL configurados, no se usa (el relay sigue con el token opaco).
+# [crypto] habilita firmas asimétricas (RS256/ES256) además de HS256.
+pyjwt[crypto]==2.10.1
