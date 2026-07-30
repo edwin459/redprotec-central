@@ -51,6 +51,8 @@ class Store(Protocol):
                     summary: dict, devices: list | None,
                     remote_admin: bool, updated_at: datetime) -> None: ...
     def list_sites(self, org: str) -> list[tuple[str, dict]]: ...
+    # TODAS las sedes de TODAS las orgs (solo para el panel de FLOTA del dueño).
+    def iter_sites_all(self) -> list[tuple[str, str, dict]]: ...
 
     # comandos (cola por sede)
     def enqueue_command(self, org: str, site_id: str, command: dict) -> None: ...
@@ -123,6 +125,12 @@ class MemoryStore:
     def list_sites(self, org: str) -> list[tuple[str, dict]]:
         with self._lock:
             return list(self._sites.get(org, {}).items())
+
+    def iter_sites_all(self) -> list[tuple[str, str, dict]]:
+        with self._lock:
+            return [(org, sid, rec)
+                    for org, sites in self._sites.items()
+                    for sid, rec in sites.items()]
 
     def enqueue_command(self, org, site_id, command) -> None:
         with self._lock:
@@ -406,6 +414,14 @@ class PostgresStore:
             )
             rows = cur.fetchall()
         return [(r[0], self._row_to_site(r[1:])) for r in rows]
+
+    def iter_sites_all(self) -> list[tuple[str, str, dict]]:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT org_token, site_id, site_name, summary, devices, "
+                "remote_admin, updated_at FROM sites")
+            rows = cur.fetchall()
+        return [(r[0], r[1], self._row_to_site(r[2:])) for r in rows]
 
     # ── comandos ──
     def enqueue_command(self, org, site_id, command) -> None:

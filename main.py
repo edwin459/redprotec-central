@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from auth import verify_supabase_jwt
 from store import create_store
 
-app = FastAPI(title="RedProtec Central Relay", version="0.5.0")
+app = FastAPI(title="RedProtec Central Relay", version="0.6.0")
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -765,6 +765,85 @@ def require_admin(authorization: str | None = Header(default=None)) -> bool:
     if not authorization or authorization.strip() != f"Bearer {ADMIN_TOKEN}":
         raise HTTPException(status_code=403, detail="Requiere token de super-admin")
     return True
+
+
+def _plan_readonly(org: str, now: datetime) -> str:
+    """Plan efectivo SIN mutar el almacén (para vistas de solo lectura del panel).
+    A diferencia de `_compute_entitlement`, NO crea la prueba a una cuenta nueva."""
+    if org in OWNER_ORGS:
+        return "pro"
+    ent = store.get_entitlement(org)
+    if ent is None:
+        return "trial"  # cuenta que aún no consultó su plan → prueba por defecto
+    plan = ent.get("plan", "free")
+    trial_ends_at = ent.get("trial_ends_at")
+    if trial_ends_at is not None and getattr(trial_ends_at, "tzinfo", None) is None:
+        trial_ends_at = trial_ends_at.replace(tzinfo=timezone.utc)
+    if plan == "pro":
+        return "pro"
+    if plan == "trial":
+        return "pro" if (trial_ends_at and now < trial_ends_at) else "free"
+    return "free"
+
+
+@app.get("/v1/admin/fleet")
+def admin_fleet(_: bool = Depends(require_admin)) -> dict:
+    """**Panel de FLOTA del dueño** (solo super-admin). Vista de TODAS las cuentas
+    con AGREGADOS por cuenta: sedes, equipos, alertas, plan, y si el agente está
+    en línea — para dar soporte y ver problemas de raíz. NO expone el inventario
+    (equipos/MACs) de la red de ningún cliente: soporte sin vigilar. La salud por
+    cuenta permite priorizar (sin conexión / críticos caídos / alertas)."""
+    now = _now()
+    orgs: dict[str, dict] = {}
+    for org, _site_id, rec in store.iter_sites_all():
+        summ = rec.get("summary") or {}
+        updated = rec.get("updated_at")
+        online = updated is not None and (
+            now - updated).total_seconds() <= ONLINE_WINDOW_SECONDS
+        o = orgs.setdefault(org, {
+            "org": org, "sites": 0, "sites_online": 0, "devices": 0,
+            "alerts": 0, "criticals_down": 0, "last_seen": None,
+        })
+        o["sites"] += 1
+        o["sites_online"] += 1 if online else 0
+        o["devices"] += int(summ.get("devices_total", 0) or 0)
+        o["alerts"] += int(summ.get("alerts", 0) or 0)
+        o["criticals_down"] += int(summ.get("criticals_down", 0) or 0)
+        if updated is not None and (o["last_seen"] is None or updated > o["last_seen"]):
+            o["last_seen"] = updated
+
+    fleet: list[dict] = []
+    dist = {"free": 0, "trial": 0, "pro": 0}
+    for org, o in orgs.items():
+        plan = _plan_readonly(org, now)
+        dist[plan] = dist.get(plan, 0) + 1
+        any_online = o["sites_online"] > 0
+        last = o["last_seen"]
+        fleet.append({
+            **o,
+            "plan": plan,
+            "online": any_online,
+            "needs_attention": (not any_online) or o["criticals_down"] > 0 or o["alerts"] > 0,
+            "last_seen": last.isoformat() if last else None,
+            "seconds_since_seen": int((now - last).total_seconds()) if last else None,
+        })
+    # Peor salud primero: sin conexión → críticos caídos → alertas → más equipos.
+    fleet.sort(key=lambda f: (
+        0 if not f["online"] else 1,
+        0 if f["criticals_down"] else 1,
+        0 if f["alerts"] else 1,
+        -f["devices"],
+    ))
+    totals = {
+        "accounts": len(orgs),
+        "accounts_online": sum(1 for f in fleet if f["online"]),
+        "accounts_attention": sum(1 for f in fleet if f["needs_attention"]),
+        "sites": sum(o["sites"] for o in orgs.values()),
+        "devices": sum(o["devices"] for o in orgs.values()),
+        "alerts": sum(o["alerts"] for o in orgs.values()),
+        "plans": dist,
+    }
+    return {"fleet": fleet, "totals": totals, "generated_at": now.isoformat()}
 
 
 @app.put("/v1/admin/entitlement")

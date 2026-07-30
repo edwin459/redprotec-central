@@ -277,6 +277,29 @@ class CloudRbacTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 402)
         main.ADMIN_TOKEN = ""
 
+    def test_admin_fleet_aggregates_all_accounts(self):
+        # Otra org con problema (agente "offline" por updated_at viejo).
+        import datetime as _dt
+        _seed_site("org-b-token-9999", "cali", "Cali")
+        main._STORE["org-b-token-9999"]["cali"]["updated_at"] = (
+            main._now() - _dt.timedelta(hours=2))
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            out = main.admin_fleet(_=main.require_admin("Bearer admin-secreto-test"))
+        finally:
+            main.ADMIN_TOKEN = ""
+        self.assertEqual(out["totals"]["accounts"], 2)
+        # La cuenta con agente offline necesita atención y va primero (peor salud).
+        self.assertTrue(out["fleet"][0]["needs_attention"])
+        # No se filtra inventario de equipos de ningún cliente.
+        self.assertNotIn("devices_list", out["fleet"][0])
+
+    def test_admin_fleet_requires_admin_token(self):
+        main.ADMIN_TOKEN = ""
+        with self.assertRaises(HTTPException) as ctx:
+            main.admin_fleet(_=main.require_admin(None))
+        self.assertEqual(ctx.exception.status_code, 403)
+
     def test_owner_is_always_pro(self):
         # El dueño (OWNER_ORGS) es Pro permanente aunque el almacén lo marque free.
         main.OWNER_ORGS = {"dueno-1"}
