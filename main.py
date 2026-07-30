@@ -278,8 +278,22 @@ def _site_out(site_id: str, rec: dict, now: datetime) -> dict:
 # ─────────────────────────── endpoints ───────────────────────────
 @app.get("/health")
 def health() -> dict:
-    orgs, sites = store.stats()
-    return {"status": "ok", "version": app.version, "orgs": orgs, "sites": sites}
+    """Liveness. NO consulta la base a propósito: el healthcheck del host debe
+    pasar en cuanto el proceso arranca, sin esperar a que Postgres esté listo
+    (un arranque en frío lento hacía fallar el deploy). Los contadores van en
+    ``/stats``."""
+    return {"status": "ok", "version": app.version}
+
+
+@app.get("/stats")
+def stats() -> dict:
+    """Contadores (best-effort). Si la base aún no responde, devuelve nulls sin
+    romper — no es un endpoint de liveness."""
+    try:
+        orgs, sites = store.stats()
+        return {"status": "ok", "orgs": orgs, "sites": sites}
+    except Exception:  # noqa: BLE001
+        return {"status": "db_unavailable", "orgs": None, "sites": None}
 
 
 @app.post("/v1/heartbeat")

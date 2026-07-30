@@ -19,10 +19,14 @@ interfaz (`Store`), así que cambiar de backend no cambia ninguna respuesta.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -209,11 +213,13 @@ class PostgresStore:
     """
 
     def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 10,
-                 init_schema: bool = True):
+                 create_schema: bool = True):
         from psycopg.types.json import Json  # noqa: F401  (validación temprana)
         from psycopg_pool import ConnectionPool
 
         self._Json = Json
+        self._schema_ready = False
+        self._schema_lock = threading.Lock()
         self._pool = ConnectionPool(
             conninfo=dsn,
             min_size=min_size,
@@ -221,12 +227,41 @@ class PostgresStore:
             kwargs={"prepare_threshold": None},
             open=True,
         )
-        if init_schema:
-            self.init_schema()
+        if create_schema:
+            # Intento TEMPRANO best-effort: si la base ya responde, deja las
+            # tablas listas. En un arranque en frío en que aún no conecta, NO
+            # bloquea ni se cae — el esquema se crea de forma perezosa en la
+            # primera operación real (_ensure_schema). Así el proceso arranca y
+            # responde /health sin depender de que Postgres esté listo, y el
+            # healthcheck del host no marca el deploy como fallido.
+            try:
+                self._ensure_schema()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Esquema no creado al arrancar (se hará al primer uso): %s", exc)
+
+    def _ensure_schema(self) -> None:
+        """Crea las tablas una sola vez (idempotente, perezoso, thread-safe)."""
+        if self._schema_ready:
+            return
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            with self._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(SCHEMA_SQL)
+            self._schema_ready = True
 
     def init_schema(self) -> None:
-        with self._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(SCHEMA_SQL)
+        """Crea/asegura las tablas ahora (idempotente). Útil para tests."""
+        self._schema_ready = False
+        self._ensure_schema()
+
+    @contextmanager
+    def _connection(self):
+        """Conexión del pool asegurando el esquema (perezoso) antes de usarla."""
+        self._ensure_schema()
+        with self._pool.connection() as conn:
+            yield conn
 
     def close(self) -> None:
         self._pool.close()
@@ -244,7 +279,7 @@ class PostgresStore:
 
     # ── salud ──
     def stats(self) -> tuple[int, int]:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT count(DISTINCT org_token), count(*) FROM sites")
             orgs, sites = cur.fetchone()
@@ -252,7 +287,7 @@ class PostgresStore:
 
     # ── sedes ──
     def get_site(self, org: str, site_id: str) -> dict | None:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT site_name, summary, devices, remote_admin, updated_at "
                 "FROM sites WHERE org_token = %s AND site_id = %s",
@@ -263,7 +298,7 @@ class PostgresStore:
 
     def upsert_site(self, org, site_id, site_name, summary, devices,
                     remote_admin, updated_at) -> None:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO sites
@@ -283,7 +318,7 @@ class PostgresStore:
             )
 
     def list_sites(self, org: str) -> list[tuple[str, dict]]:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT site_id, site_name, summary, devices, remote_admin, "
                 "updated_at FROM sites WHERE org_token = %s",
@@ -294,7 +329,7 @@ class PostgresStore:
 
     # ── comandos ──
     def enqueue_command(self, org, site_id, command) -> None:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO commands (id, org_token, site_id, action, mac, "
                 "value, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -304,7 +339,7 @@ class PostgresStore:
 
     def pending_commands(self, org, site_id, ttl_seconds, now) -> list[dict]:
         cutoff = now - timedelta(seconds=ttl_seconds)
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             # Poda las órdenes vencidas (misma semántica que el TTL en memoria).
             cur.execute(
                 "DELETE FROM commands WHERE org_token = %s AND site_id = %s "
@@ -321,7 +356,7 @@ class PostgresStore:
                 for r in rows]
 
     def ack_command(self, org, site_id, command_id) -> None:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM commands WHERE org_token = %s AND site_id = %s "
                 "AND id = %s",
@@ -330,7 +365,7 @@ class PostgresStore:
 
     # ── config ──
     def get_org_config(self, org: str) -> dict:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT alert_topic FROM org_config WHERE org_token = %s",
                 (org,),
@@ -339,7 +374,7 @@ class PostgresStore:
         return {"alert_topic": row[0]} if row else {}
 
     def set_alert_topic(self, org: str, topic: str | None) -> None:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO org_config (org_token, alert_topic) VALUES (%s, %s) "
                 "ON CONFLICT (org_token) DO UPDATE SET alert_topic = EXCLUDED.alert_topic",
@@ -348,7 +383,7 @@ class PostgresStore:
 
     # ── accesos ──
     def resolve_user(self, user_token: str) -> tuple[str, dict] | None:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT org_token, name, role, sites FROM access "
                 "WHERE user_token = %s LIMIT 1",
@@ -362,7 +397,7 @@ class PostgresStore:
                          "sites": list(sites or ["*"])}
 
     def list_access(self, org: str) -> dict[str, dict]:
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT user_token, name, role, sites FROM access "
                 "WHERE org_token = %s",
@@ -374,7 +409,7 @@ class PostgresStore:
 
     def set_access(self, org: str, users: list[dict]) -> None:
         # Reemplazo atómico de la lista completa (misma semántica que PUT en memoria).
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM access WHERE org_token = %s", (org,))
             for u in users:
                 cur.execute(
@@ -396,5 +431,9 @@ def create_store(sites: dict, commands: dict, org_config: dict, access: dict,
     """
     dsn = os.environ.get("DATABASE_URL", "").strip()
     if dsn:
-        return PostgresStore(dsn)
+        # create_schema=False: NO se toca la base al importar el módulo (así el
+        # proceso arranca al instante y /health pasa el healthcheck sin esperar a
+        # Postgres). Las tablas se crean de forma perezosa en la primera
+        # operación real (_ensure_schema), que es idempotente.
+        return PostgresStore(dsn, create_schema=False)
     return MemoryStore(sites, commands, org_config, access, lock)
