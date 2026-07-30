@@ -30,6 +30,8 @@ class CloudRbacTests(unittest.TestCase):
         main._ACCESS.clear()
         if hasattr(main.store, "_agent_tokens"):
             main.store._agent_tokens.clear()
+        if hasattr(main.store, "_entitlements"):
+            main.store._entitlements.clear()
         self.org = "org-master-token-1234"
         _seed_site(self.org, "bogota", "Bogotá")
         _seed_site(self.org, "medellin", "Medellín")
@@ -242,6 +244,61 @@ class CloudRbacTests(unittest.TestCase):
         p_after = main.principal(authorization=f"Bearer {tok}")
         self.assertEqual(p_after.org_token, tok)  # opaco: org keyed por el token
         self.assertEqual(main.list_agent_tokens(p=a)["agents"], [])
+
+    # ── Auth-3: entitlement / freemium ──────────────────────────────────
+    def test_new_account_gets_pro_trial(self):
+        p = main._resolve_principal("cuenta-nueva-Z")
+        ent = main.get_entitlement(p=p)
+        self.assertEqual(ent["plan"], "trial")
+        self.assertEqual(ent["effective"], "pro")
+        self.assertTrue(ent["can_control"])
+        self.assertGreaterEqual(ent["trial_days_left"], 4)
+
+    def test_command_allowed_during_trial(self):
+        # self.org es nuevo → prueba Pro → puede comandar.
+        out = main.enqueue_command(
+            "bogota", main.CommandIn(action="block", mac="AA:BB"),
+            p=main._resolve_principal(self.org))
+        self.assertTrue(out["ok"])
+
+    def test_command_blocked_when_free(self):
+        # Marca la org como free (super-admin) → 402 al intentar comandar.
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            main.admin_set_entitlement(
+                main.AdminEntitlementIn(org_token=self.org, plan="free"),
+                _=main.require_admin("Bearer admin-secreto-test"))
+        finally:
+            pass
+        with self.assertRaises(HTTPException) as ctx:
+            main.enqueue_command(
+                "bogota", main.CommandIn(action="block", mac="AA:BB"),
+                p=main._resolve_principal(self.org))
+        self.assertEqual(ctx.exception.status_code, 402)
+        main.ADMIN_TOKEN = ""
+
+    def test_expired_trial_is_free(self):
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        # trial de 0 días → ya vencido → free efectivo.
+        main.admin_set_entitlement(
+            main.AdminEntitlementIn(org_token="cuenta-vencida", plan="trial", trial_days=0),
+            _=main.require_admin("Bearer admin-secreto-test"))
+        main.ADMIN_TOKEN = ""
+        ent = main._compute_entitlement("cuenta-vencida", main._now())
+        self.assertEqual(ent["plan"], "trial")
+        self.assertEqual(ent["effective"], "free")
+        self.assertFalse(ent["can_control"])
+
+    def test_admin_requires_token(self):
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        with self.assertRaises(HTTPException) as ctx:
+            main.require_admin("Bearer token-equivocado")
+        self.assertEqual(ctx.exception.status_code, 403)
+        main.ADMIN_TOKEN = ""
+        # Sin ADMIN_TOKEN configurado, el admin queda cerrado.
+        with self.assertRaises(HTTPException) as ctx2:
+            main.require_admin("Bearer lo-que-sea")
+        self.assertEqual(ctx2.exception.status_code, 403)
 
 
 if __name__ == "__main__":

@@ -74,6 +74,11 @@ class Store(Protocol):
     def list_agent_tokens(self, org: str) -> list[dict]: ...
     def revoke_agent_token(self, org: str, token: str) -> None: ...
 
+    # entitlement / plan (Auth-3: freemium)
+    def get_entitlement(self, org: str) -> dict | None: ...
+    def set_entitlement(self, org: str, plan: str,
+                        trial_ends_at: datetime | None) -> None: ...
+
 
 # ─────────────────────────── memoria ───────────────────────────
 class MemoryStore:
@@ -88,6 +93,7 @@ class MemoryStore:
         self._org_config = org_config  # org -> {alert_topic}
         self._access = access        # org -> user_token -> {name, role, sites}
         self._agent_tokens: dict[str, dict] = {}  # token -> {org, label, created_at}
+        self._entitlements: dict[str, dict] = {}  # org -> {plan, trial_ends_at}
         self._lock = lock or threading.Lock()
 
     def stats(self) -> tuple[int, int]:
@@ -191,6 +197,16 @@ class MemoryStore:
             if rec and rec.get("org") == org:
                 del self._agent_tokens[token]
 
+    def get_entitlement(self, org: str) -> dict | None:
+        with self._lock:
+            rec = self._entitlements.get(org)
+            return dict(rec) if rec else None
+
+    def set_entitlement(self, org, plan, trial_ends_at) -> None:
+        with self._lock:
+            self._entitlements[org] = {
+                "plan": plan, "trial_ends_at": trial_ends_at}
+
 
 # ─────────────────────────── postgres ───────────────────────────
 SCHEMA_SQL = """
@@ -239,6 +255,12 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
     created_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS agent_tokens_org_idx ON agent_tokens (org_token);
+
+CREATE TABLE IF NOT EXISTS entitlements (
+    org_token     text PRIMARY KEY,
+    plan          text NOT NULL DEFAULT 'trial',   -- free | trial | pro
+    trial_ends_at timestamptz
+);
 """
 
 
@@ -488,6 +510,23 @@ class PostgresStore:
             cur.execute(
                 "DELETE FROM agent_tokens WHERE org_token = %s AND token = %s",
                 (org, token))
+
+    # ── entitlement ──
+    def get_entitlement(self, org: str) -> dict | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan, trial_ends_at FROM entitlements WHERE org_token = %s",
+                (org,))
+            row = cur.fetchone()
+        return {"plan": row[0], "trial_ends_at": row[1]} if row else None
+
+    def set_entitlement(self, org, plan, trial_ends_at) -> None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO entitlements (org_token, plan, trial_ends_at) "
+                "VALUES (%s, %s, %s) ON CONFLICT (org_token) DO UPDATE SET "
+                "plan = EXCLUDED.plan, trial_ends_at = EXCLUDED.trial_ends_at",
+                (org, plan, trial_ends_at))
 
 
 # ─────────────────────────── selección ───────────────────────────

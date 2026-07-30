@@ -22,7 +22,7 @@ import secrets
 import threading
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -36,6 +36,12 @@ ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
 # orden vieja se ejecute cuando la sede vuelva días después).
 COMMAND_TTL_SECONDS = int(os.environ.get("COMMAND_TTL_SECONDS", "600"))
+# Auth-3 (freemium): días de prueba Pro al crear la cuenta. Un solo valor,
+# cambiable por entorno (ej. TRIAL_DAYS=3) sin tocar código.
+TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "5"))
+# Token de super-admin (tú, el dueño del negocio) para marcar cuentas Pro/Free a
+# mano mientras no hay cobro automático. Vacío = el endpoint de admin queda cerrado.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
 
 _LOCK = threading.Lock()
 # org_token -> site_id -> record{ site_name, summary, devices, updated_at }
@@ -56,6 +62,49 @@ _ACCESS: dict[str, dict[str, dict]] = {}
 # endpoints usan `store.*`; los dicts quedan como respaldo en memoria y para que
 # los tests que los tocan directamente sigan funcionando igual.
 store = create_store(_STORE, _COMMANDS, _ORG_CONFIG, _ACCESS, _LOCK)
+
+
+# ─────────────────────── Auth-3: entitlement / plan ───────────────────────
+def _ensure_entitlement(org: str, now: datetime) -> dict:
+    """Devuelve el registro de plan de la org; si no existe (cuenta nueva), le
+    inicia una PRUEBA Pro de TRIAL_DAYS días. Fuente de verdad única del plan."""
+    ent = store.get_entitlement(org)
+    if ent is None:
+        trial_end = now + timedelta(days=TRIAL_DAYS)
+        store.set_entitlement(org, "trial", trial_end)
+        return {"plan": "trial", "trial_ends_at": trial_end}
+    return ent
+
+
+def _compute_entitlement(org: str, now: datetime) -> dict:
+    """Calcula el plan EFECTIVO y las capacidades que leen agente, móvil y relay
+    (un mismo contrato). `trial` vigente = Pro; `trial` vencido = free."""
+    ent = _ensure_entitlement(org, now)
+    plan = ent.get("plan", "free")
+    trial_ends_at = ent.get("trial_ends_at")
+    if trial_ends_at is not None and trial_ends_at.tzinfo is None:
+        trial_ends_at = trial_ends_at.replace(tzinfo=timezone.utc)
+
+    if plan == "pro":
+        effective = "pro"
+    elif plan == "trial":
+        effective = "pro" if (trial_ends_at and now < trial_ends_at) else "free"
+    else:
+        effective = "free"
+    can_control = effective == "pro"
+
+    trial_days_left = 0
+    if plan == "trial" and trial_ends_at and now < trial_ends_at:
+        trial_days_left = max(0, (trial_ends_at - now).days)
+
+    return {
+        "plan": plan,               # lo que compró/tiene: free | trial | pro
+        "effective": effective,     # lo que RIGE ahora: free | pro
+        "can_control": can_control, # bloquear/confiar/desbloquear/guardián
+        "max_sites": 5 if can_control else 1,
+        "trial_ends_at": trial_ends_at.isoformat() if trial_ends_at else None,
+        "trial_days_left": trial_days_left,
+    }
 
 # ─────────────────────── RBAC: roles y capacidades ───────────────────────
 # Espejo de mobile/lib/core/domain/access/roles.dart, recortado a las acciones
@@ -407,7 +456,13 @@ def heartbeat(hb: Heartbeat, p: Principal = Depends(require_master)) -> dict:
     for title, msg, prio, tags in alerts:
         _push_ntfy(alert_topic, title, msg, priority=prio, tags=tags)
 
-    return {"ok": True, "commands": pending}
+    # El agente recibe su plan en cada latido → gatea el control con el MISMO
+    # contrato que el móvil (agente y app hablan un solo idioma sobre Free/Pro).
+    return {
+        "ok": True,
+        "commands": pending,
+        "entitlement": _compute_entitlement(org_token, now),
+    }
 
 
 @app.get("/v1/sites")
@@ -465,6 +520,10 @@ def enqueue_command(
             status_code=403,
             detail=f"Tu rol ({p.role}) no puede ejecutar «{cmd.action}» a distancia",
         )
+    # Auth-3 (freemium): controlar (bloquear/confiar/…) exige plan Pro. Refuerzo
+    # SERVER-SIDE → no se puede saltar desde el móvil. Ver = gratis; proteger = Pro.
+    if not _compute_entitlement(p.org_token, now)["can_control"]:
+        raise HTTPException(status_code=402, detail="upgrade_required")
     rec = store.get_site(p.org_token, site_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Sede no encontrada")
@@ -642,3 +701,45 @@ def revoke_agent_token(token: str, p: Principal = Depends(require_master)) -> di
     """Revoca (desvincula) un token de agente de la cuenta."""
     store.revoke_agent_token(p.org_token, token)
     return {"ok": True}
+
+
+# ─────────────────────── Auth-3: entitlement / plan ───────────────────────
+@app.get("/v1/entitlement")
+def get_entitlement(p: Principal = Depends(principal)) -> dict:
+    """Plan efectivo de quien llama (cuenta, agente o dueño). Lo consumen la app
+    y el agente con el MISMO contrato. A una cuenta nueva le inicia la prueba Pro."""
+    ent = _compute_entitlement(p.org_token, _now())
+    ent["org"] = p.org_token  # el móvil lo muestra para soporte / admin manual
+    return ent
+
+
+class AdminEntitlementIn(BaseModel):
+    org_token: str = Field(min_length=1, max_length=200)
+    plan: str = Field(pattern="^(free|trial|pro)$")
+    trial_days: int | None = Field(default=None, ge=0, le=3650)
+
+
+def require_admin(authorization: str | None = Header(default=None)) -> bool:
+    """Super-admin (el dueño del negocio) por `ADMIN_TOKEN`. Sin la variable
+    configurada, el endpoint queda cerrado (nadie puede marcarse Pro solo)."""
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Admin deshabilitado")
+    if not authorization or authorization.strip() != f"Bearer {ADMIN_TOKEN}":
+        raise HTTPException(status_code=403, detail="Requiere token de super-admin")
+    return True
+
+
+@app.put("/v1/admin/entitlement")
+def admin_set_entitlement(
+    body: AdminEntitlementIn, _: bool = Depends(require_admin)
+) -> dict:
+    """Marca el plan de una organización a mano (mientras no hay cobro
+    automático). Solo el super-admin (ADMIN_TOKEN). `pro` = control ilimitado;
+    `trial` = Pro por `trial_days` (o TRIAL_DAYS); `free` = solo ver."""
+    now = _now()
+    trial_end = None
+    if body.plan == "trial":
+        days = body.trial_days if body.trial_days is not None else TRIAL_DAYS
+        trial_end = now + timedelta(days=days)
+    store.set_entitlement(body.org_token, body.plan, trial_end)
+    return {"ok": True, "entitlement": _compute_entitlement(body.org_token, now)}

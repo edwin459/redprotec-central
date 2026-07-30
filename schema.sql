@@ -65,3 +65,12 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
     created_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS agent_tokens_org_idx ON agent_tokens (org_token);
+
+-- Auth-3 (freemium): plan por organización. `trial` con `trial_ends_at` da Pro
+-- temporal; al vencer, el relay lo trata como `free`. El plan efectivo se calcula
+-- en el relay y se firma para que el agente lo verifique.
+CREATE TABLE IF NOT EXISTS entitlements (
+    org_token     text PRIMARY KEY,
+    plan          text NOT NULL DEFAULT 'trial',   -- free | trial | pro
+    trial_ends_at timestamptz
+);
