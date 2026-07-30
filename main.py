@@ -97,7 +97,7 @@ def _compute_entitlement(org: str, now: datetime) -> dict:
     if plan == "trial" and trial_ends_at and now < trial_ends_at:
         trial_days_left = max(0, (trial_ends_at - now).days)
 
-    return {
+    result = {
         "plan": plan,               # lo que compró/tiene: free | trial | pro
         "effective": effective,     # lo que RIGE ahora: free | pro
         "can_control": can_control, # bloquear/confiar/desbloquear/guardián
@@ -105,6 +105,19 @@ def _compute_entitlement(org: str, now: datetime) -> dict:
         "trial_ends_at": trial_ends_at.isoformat() if trial_ends_at else None,
         "trial_days_left": trial_days_left,
     }
+    # Auth-3C: **permiso firmado** — el mismo veredicto, firmado por el relay con
+    # caducidad, para que el agente/móvil no puedan ser engañados por un proxy o
+    # un plan compartido. Es aditivo: el cliente que aún no verifica lee los
+    # campos planos; el que verifica exige esta firma para confiar en el plan.
+    try:
+        from signing import sign_entitlement
+        result["token"] = sign_entitlement(store, org, {
+            "plan": plan, "effective": effective, "can_control": can_control,
+            "max_sites": result["max_sites"], "trial_days_left": trial_days_left,
+        }, now=now)
+    except Exception:  # noqa: BLE001 - si la firma falla, el plan igual se entrega
+        pass
+    return result
 
 # ─────────────────────── RBAC: roles y capacidades ───────────────────────
 # Espejo de mobile/lib/core/domain/access/roles.dart, recortado a las acciones
@@ -713,6 +726,15 @@ def get_entitlement(p: Principal = Depends(principal)) -> dict:
     return ent
 
 
+@app.get("/v1/entitlement/pubkey")
+def entitlement_pubkey() -> dict:
+    """Llave PÚBLICA (Ed25519, PEM) con la que el agente y el móvil verifican el
+    **permiso firmado**. Pública a propósito: no permite falsificar, solo
+    verificar. Sin auth (el cliente la fija en su primer contacto)."""
+    from signing import public_key_pem
+    return {"alg": "EdDSA", "public_key": public_key_pem(store)}
+
+
 class AdminEntitlementIn(BaseModel):
     org_token: str = Field(min_length=1, max_length=200)
     plan: str = Field(pattern="^(free|trial|pro)$")
@@ -743,3 +765,75 @@ def admin_set_entitlement(
         trial_end = now + timedelta(days=days)
     store.set_entitlement(body.org_token, body.plan, trial_end)
     return {"ok": True, "entitlement": _compute_entitlement(body.org_token, now)}
+
+
+# ─────────────────── Auth-3C: Google Play Billing ───────────────────
+RTDN_SECRET = os.environ.get("RTDN_SECRET", "").strip()
+
+
+class PlayVerifyIn(BaseModel):
+    purchase_token: str = Field(min_length=8, max_length=4096)
+    product_id: str = Field(default="", max_length=200)
+
+
+@app.get("/v1/billing/play/config")
+def play_billing_config() -> dict:
+    """¿El cobro por Google Play está activo en el relay? (sin secretos). El móvil
+    lo usa para mostrar u ocultar el botón de compra."""
+    from billing_play import is_configured
+    return {"enabled": is_configured()}
+
+
+@app.post("/v1/billing/play/verify")
+def play_verify(body: PlayVerifyIn, p: Principal = Depends(principal)) -> dict:
+    """El móvil (Play) manda su `purchaseToken`; el relay lo VERIFICA con Google y,
+    si la suscripción está activa, marca esta cuenta como Pro. Server-side: el
+    cliente no puede autoconcederse Pro."""
+    from billing_play import is_configured, verify_subscription
+    if not is_configured():
+        raise HTTPException(status_code=503, detail="billing_not_configured")
+    result = verify_subscription(body.purchase_token)
+    if result is None:
+        raise HTTPException(status_code=502, detail="verification_failed")
+    now = _now()
+    if result.get("active"):
+        # Guarda el vínculo token→org para que las RTDN futuras sepan a quién
+        # aplicar la renovación/cancelación.
+        try:
+            store.kv_set(f"play_sub:{body.purchase_token}", p.org_token)
+        except Exception:  # noqa: BLE001
+            pass
+        store.set_entitlement(p.org_token, "pro", None)
+    return {
+        "ok": bool(result.get("active")),
+        "state": result.get("state"),
+        "entitlement": _compute_entitlement(p.org_token, now),
+    }
+
+
+@app.post("/v1/billing/play/rtdn")
+def play_rtdn(payload: dict, secret: str = "") -> dict:
+    """Notificación en tiempo real de Google (Pub/Sub). Re-verifica la suscripción
+    y actualiza el plan de la cuenta ligada al token. Siempre responde 200 para
+    que Pub/Sub confirme (evita reintentos infinitos)."""
+    from billing_play import decode_rtdn, verify_subscription
+    # Si se configuró un secreto compartido, exígelo (query ?secret=...).
+    if RTDN_SECRET and secret != RTDN_SECRET:
+        raise HTTPException(status_code=403, detail="bad_secret")
+    note = decode_rtdn(payload) or {}
+    sub = note.get("subscriptionNotification") or {}
+    token = sub.get("purchaseToken")
+    if not token:
+        return {"ok": True, "ignored": "no_token"}
+    org = None
+    try:
+        org = store.kv_get(f"play_sub:{token}")
+    except Exception:  # noqa: BLE001
+        org = None
+    if not org:
+        return {"ok": True, "ignored": "unknown_token"}
+    result = verify_subscription(token)
+    if result is None:
+        return {"ok": True, "ignored": "verify_unavailable"}
+    store.set_entitlement(org, "pro" if result.get("active") else "free", None)
+    return {"ok": True, "active": bool(result.get("active"))}

@@ -79,6 +79,10 @@ class Store(Protocol):
     def set_entitlement(self, org: str, plan: str,
                         trial_ends_at: datetime | None) -> None: ...
 
+    # clave/valor singleton (Auth-3C: llave de firma del entitlement, etc.)
+    def kv_get(self, key: str) -> str | None: ...
+    def kv_set(self, key: str, value: str) -> None: ...
+
 
 # ─────────────────────────── memoria ───────────────────────────
 class MemoryStore:
@@ -94,6 +98,7 @@ class MemoryStore:
         self._access = access        # org -> user_token -> {name, role, sites}
         self._agent_tokens: dict[str, dict] = {}  # token -> {org, label, created_at}
         self._entitlements: dict[str, dict] = {}  # org -> {plan, trial_ends_at}
+        self._kv: dict[str, str] = {}             # clave/valor singleton (RAM)
         self._lock = lock or threading.Lock()
 
     def stats(self) -> tuple[int, int]:
@@ -207,6 +212,14 @@ class MemoryStore:
             self._entitlements[org] = {
                 "plan": plan, "trial_ends_at": trial_ends_at}
 
+    def kv_get(self, key: str) -> str | None:
+        with self._lock:
+            return self._kv.get(key)
+
+    def kv_set(self, key: str, value: str) -> None:
+        with self._lock:
+            self._kv[key] = value
+
 
 # ─────────────────────────── postgres ───────────────────────────
 SCHEMA_SQL = """
@@ -260,6 +273,11 @@ CREATE TABLE IF NOT EXISTS entitlements (
     org_token     text PRIMARY KEY,
     plan          text NOT NULL DEFAULT 'trial',   -- free | trial | pro
     trial_ends_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS relay_kv (
+    k text PRIMARY KEY,
+    v text NOT NULL
 );
 """
 
@@ -527,6 +545,20 @@ class PostgresStore:
                 "VALUES (%s, %s, %s) ON CONFLICT (org_token) DO UPDATE SET "
                 "plan = EXCLUDED.plan, trial_ends_at = EXCLUDED.trial_ends_at",
                 (org, plan, trial_ends_at))
+
+    # ── clave/valor singleton ──
+    def kv_get(self, key: str) -> str | None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT v FROM relay_kv WHERE k = %s", (key,))
+            row = cur.fetchone()
+        return row[0] if row else None
+
+    def kv_set(self, key: str, value: str) -> None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO relay_kv (k, v) VALUES (%s, %s) "
+                "ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+                (key, value))
 
 
 # ─────────────────────────── selección ───────────────────────────

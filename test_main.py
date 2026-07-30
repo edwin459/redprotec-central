@@ -277,6 +277,18 @@ class CloudRbacTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 402)
         main.ADMIN_TOKEN = ""
 
+    def test_entitlement_carries_signed_token_verifiable_with_pubkey(self):
+        # Auth-3C: el veredicto viene firmado; la pública del endpoint lo verifica.
+        import jwt
+        p = main._resolve_principal("cuenta-firmada-1")
+        ent = main.get_entitlement(p=p)
+        self.assertIn("token", ent)
+        pub = main.entitlement_pubkey()["public_key"]
+        dec = jwt.decode(ent["token"], pub, algorithms=["EdDSA"],
+                         options={"require": ["exp", "sub"]})
+        self.assertEqual(dec["sub"], "cuenta-firmada-1")
+        self.assertEqual(dec["can_control"], ent["can_control"])
+
     def test_expired_trial_is_free(self):
         main.ADMIN_TOKEN = "admin-secreto-test"
         # trial de 0 días → ya vencido → free efectivo.
