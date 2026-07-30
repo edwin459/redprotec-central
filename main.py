@@ -42,6 +42,12 @@ TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "5"))
 # Token de super-admin (tú, el dueño del negocio) para marcar cuentas Pro/Free a
 # mano mientras no hay cobro automático. Vacío = el endpoint de admin queda cerrado.
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
+# DUEÑO(S) del proyecto: sus cuentas son Pro PERMANENTE (nunca pagan, control
+# total), para que tú y tu equipo administren todo sin fricción. Lista de IDs de
+# organización (el `sub` de Supabase = el campo `org` que muestra /v1/entitlement),
+# separados por coma. Vacío = nadie es dueño (comportamiento normal). Se configura
+# por entorno en el host; no es un secreto (son identificadores, no credenciales).
+OWNER_ORGS = {x.strip() for x in os.environ.get("OWNER_ORG_IDS", "").split(",") if x.strip()}
 
 _LOCK = threading.Lock()
 # org_token -> site_id -> record{ site_name, summary, devices, updated_at }
@@ -79,31 +85,41 @@ def _ensure_entitlement(org: str, now: datetime) -> dict:
 def _compute_entitlement(org: str, now: datetime) -> dict:
     """Calcula el plan EFECTIVO y las capacidades que leen agente, móvil y relay
     (un mismo contrato). `trial` vigente = Pro; `trial` vencido = free."""
-    ent = _ensure_entitlement(org, now)
-    plan = ent.get("plan", "free")
-    trial_ends_at = ent.get("trial_ends_at")
-    if trial_ends_at is not None and trial_ends_at.tzinfo is None:
-        trial_ends_at = trial_ends_at.replace(tzinfo=timezone.utc)
-
-    if plan == "pro":
-        effective = "pro"
-    elif plan == "trial":
-        effective = "pro" if (trial_ends_at and now < trial_ends_at) else "free"
+    is_owner = org in OWNER_ORGS
+    if is_owner:
+        # Dueño del proyecto: Pro permanente, sin prueba ni vencimiento. No se le
+        # crea registro de entitlement (no depende del almacén).
+        plan = effective = "pro"
+        can_control = True
+        trial_ends_at = None
+        trial_days_left = 0
     else:
-        effective = "free"
-    can_control = effective == "pro"
+        ent = _ensure_entitlement(org, now)
+        plan = ent.get("plan", "free")
+        trial_ends_at = ent.get("trial_ends_at")
+        if trial_ends_at is not None and trial_ends_at.tzinfo is None:
+            trial_ends_at = trial_ends_at.replace(tzinfo=timezone.utc)
 
-    trial_days_left = 0
-    if plan == "trial" and trial_ends_at and now < trial_ends_at:
-        trial_days_left = max(0, (trial_ends_at - now).days)
+        if plan == "pro":
+            effective = "pro"
+        elif plan == "trial":
+            effective = "pro" if (trial_ends_at and now < trial_ends_at) else "free"
+        else:
+            effective = "free"
+        can_control = effective == "pro"
+
+        trial_days_left = 0
+        if plan == "trial" and trial_ends_at and now < trial_ends_at:
+            trial_days_left = max(0, (trial_ends_at - now).days)
 
     result = {
         "plan": plan,               # lo que compró/tiene: free | trial | pro
         "effective": effective,     # lo que RIGE ahora: free | pro
         "can_control": can_control, # bloquear/confiar/desbloquear/guardián
-        "max_sites": 5 if can_control else 1,
+        "max_sites": 9999 if is_owner else (5 if can_control else 1),
         "trial_ends_at": trial_ends_at.isoformat() if trial_ends_at else None,
         "trial_days_left": trial_days_left,
+        "owner": is_owner,          # tu cuenta de dueño (Pro permanente)
     }
     # Auth-3C: **permiso firmado** — el mismo veredicto, firmado por el relay con
     # caducidad, para que el agente/móvil no puedan ser engañados por un proxy o

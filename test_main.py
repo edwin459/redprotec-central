@@ -277,6 +277,33 @@ class CloudRbacTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 402)
         main.ADMIN_TOKEN = ""
 
+    def test_owner_is_always_pro(self):
+        # El dueño (OWNER_ORGS) es Pro permanente aunque el almacén lo marque free.
+        main.OWNER_ORGS = {"dueno-1"}
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            main.admin_set_entitlement(
+                main.AdminEntitlementIn(org_token="dueno-1", plan="free"),
+                _=main.require_admin("Bearer admin-secreto-test"))
+            ent = main._compute_entitlement("dueno-1", main._now())
+            self.assertEqual(ent["effective"], "pro")
+            self.assertTrue(ent["can_control"])
+            self.assertTrue(ent["owner"])
+            self.assertGreater(ent["max_sites"], 100)
+        finally:
+            main.OWNER_ORGS = set()
+            main.ADMIN_TOKEN = ""
+
+    def test_owner_can_command(self):
+        main.OWNER_ORGS = {self.org}
+        try:
+            out = main.enqueue_command(
+                "bogota", main.CommandIn(action="block", mac="AA:BB"),
+                p=main._resolve_principal(self.org))
+            self.assertTrue(out["ok"])
+        finally:
+            main.OWNER_ORGS = set()
+
     def test_entitlement_carries_signed_token_verifiable_with_pubkey(self):
         # Auth-3C: el veredicto viene firmado; la pública del endpoint lo verifica.
         import jwt
