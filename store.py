@@ -65,6 +65,10 @@ class Store(Protocol):
     # config de la organización
     def get_org_config(self, org: str) -> dict: ...
     def set_alert_topic(self, org: str, topic: str | None) -> None: ...
+    # Canal Telegram del watchdog en la nube (Railway no alcanza ntfy.sh, sí
+    # api.telegram.org). Reutiliza el bot que el dueño ya configuró en el agente.
+    def set_alert_channel(self, org: str, *, telegram_bot_token: str | None,
+                          telegram_chat_id: str | None) -> None: ...
 
     # accesos (RBAC en la nube)
     def resolve_user(self, user_token: str) -> tuple[str, dict] | None: ...
@@ -172,6 +176,12 @@ class MemoryStore:
         with self._lock:
             self._org_config.setdefault(org, {})["alert_topic"] = topic
 
+    def set_alert_channel(self, org, *, telegram_bot_token, telegram_chat_id) -> None:
+        with self._lock:
+            cfg = self._org_config.setdefault(org, {})
+            cfg["tg_bot_token"] = telegram_bot_token
+            cfg["tg_chat_id"] = telegram_chat_id
+
     def resolve_user(self, user_token: str) -> tuple[str, dict] | None:
         with self._lock:
             for org_tok, users in self._access.items():
@@ -264,9 +274,14 @@ CREATE INDEX IF NOT EXISTS commands_site_idx
     ON commands (org_token, site_id, created_at);
 
 CREATE TABLE IF NOT EXISTS org_config (
-    org_token   text PRIMARY KEY,
-    alert_topic text
+    org_token    text PRIMARY KEY,
+    alert_topic  text,
+    tg_bot_token text,
+    tg_chat_id   text
 );
+-- Migración idempotente para relays ya desplegados (la tabla existía sin Telegram).
+ALTER TABLE org_config ADD COLUMN IF NOT EXISTS tg_bot_token text;
+ALTER TABLE org_config ADD COLUMN IF NOT EXISTS tg_chat_id   text;
 
 CREATE TABLE IF NOT EXISTS access (
     org_token  text  NOT NULL,
@@ -485,11 +500,14 @@ class PostgresStore:
     def get_org_config(self, org: str) -> dict:
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT alert_topic FROM org_config WHERE org_token = %s",
+                "SELECT alert_topic, tg_bot_token, tg_chat_id "
+                "FROM org_config WHERE org_token = %s",
                 (org,),
             )
             row = cur.fetchone()
-        return {"alert_topic": row[0]} if row else {}
+        if not row:
+            return {}
+        return {"alert_topic": row[0], "tg_bot_token": row[1], "tg_chat_id": row[2]}
 
     def set_alert_topic(self, org: str, topic: str | None) -> None:
         with self._connection() as conn, conn.cursor() as cur:
@@ -497,6 +515,15 @@ class PostgresStore:
                 "INSERT INTO org_config (org_token, alert_topic) VALUES (%s, %s) "
                 "ON CONFLICT (org_token) DO UPDATE SET alert_topic = EXCLUDED.alert_topic",
                 (org, topic),
+            )
+
+    def set_alert_channel(self, org, *, telegram_bot_token, telegram_chat_id) -> None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO org_config (org_token, tg_bot_token, tg_chat_id) "
+                "VALUES (%s, %s, %s) ON CONFLICT (org_token) DO UPDATE SET "
+                "tg_bot_token = EXCLUDED.tg_bot_token, tg_chat_id = EXCLUDED.tg_chat_id",
+                (org, telegram_bot_token, telegram_chat_id),
             )
 
     # ── accesos ──

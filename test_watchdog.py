@@ -158,5 +158,67 @@ class WatchdogTickTest(unittest.TestCase):
         self.assertEqual(e4, [])
 
 
+class AlertRoutingTest(unittest.TestCase):
+    """El watchdog en la nube prefiere Telegram (Railway alcanza api.telegram.org;
+    ntfy.sh está bloqueado). ntfy queda como respaldo."""
+
+    def setUp(self):
+        self._tg = main._push_telegram
+        self._ntfy = main._push_ntfy
+        self.tg_calls = []
+        self.ntfy_calls = []
+        main._push_telegram = lambda bot, chat, title, body: (
+            self.tg_calls.append((bot, chat, title)) or "ok:200")
+        main._push_ntfy = lambda topic, title, message, *, priority, tags: (
+            self.ntfy_calls.append((topic, title)) or "ok:200")
+
+    def tearDown(self):
+        main._push_telegram = self._tg
+        main._push_ntfy = self._ntfy
+
+    def test_prefers_telegram_when_configured(self):
+        r = main._push_alert(
+            {"tg_bot_token": "123:ABC", "tg_chat_id": "999", "alert_topic": "t"},
+            "T", "B", priority="high", tags="x")
+        self.assertEqual(r, "ok:200")
+        self.assertEqual(len(self.tg_calls), 1)
+        self.assertEqual(self.ntfy_calls, [])  # NO usa ntfy si hay Telegram
+
+    def test_falls_back_to_ntfy_without_telegram(self):
+        r = main._push_alert({"alert_topic": "mytopic"}, "T", "B",
+                             priority="high", tags="x")
+        self.assertEqual(r, "ok:200")
+        self.assertEqual(self.tg_calls, [])
+        self.assertEqual(len(self.ntfy_calls), 1)
+
+    def test_no_channel_when_nothing_configured(self):
+        r = main._push_alert({}, "T", "B", priority="high", tags="x")
+        self.assertEqual(r, "no_channel")
+        self.assertEqual(self.tg_calls, [])
+        self.assertEqual(self.ntfy_calls, [])
+
+
+class AlertChannelConfigTest(unittest.TestCase):
+    def setUp(self):
+        main._STORE.clear(); main._ORG_CONFIG.clear()
+        self.org = "org-tel-1"
+
+    def tearDown(self):
+        main._ORG_CONFIG.clear()
+
+    def test_set_and_read_back_redacted(self):
+        master = main._resolve_principal(self.org)
+        main.set_alert_channel(
+            main.AlertChannelIn(telegram_bot_token="123:SECRET", telegram_chat_id="42"),
+            p=master)
+        cfg = main.get_org_config(p=master)
+        self.assertTrue(cfg["telegram_set"])          # hay canal
+        self.assertEqual(cfg["telegram_chat_id"], "42")
+        self.assertNotIn("telegram_bot_token", cfg)    # el token nunca se devuelve
+
+    def test_tg_escape_reserved_chars(self):
+        self.assertEqual(main._tg_escape("a.b-c!"), "a\\.b\\-c\\!")
+
+
 if __name__ == "__main__":
     unittest.main()

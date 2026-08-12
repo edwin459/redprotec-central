@@ -79,7 +79,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.8.7", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.0", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -282,7 +282,6 @@ def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, ta
     t = topic.strip()
     url = t if t.startswith("http") else f"https://ntfy.sh/{t}"
     safe_title = title.encode("ascii", "ignore").decode().strip() or "RedProtec"
-    opener = _IPV4_OPENER if url.startswith("https://") else urllib.request
     last = "ERR:sin_intento"
     for attempt in range(max(1, _PUSH_ATTEMPTS)):
         try:
@@ -292,13 +291,62 @@ def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, ta
                 method="POST",
                 headers={"Title": safe_title, "Priority": priority, "Tags": tags},
             )
-            resp = opener.open(req, timeout=_PUSH_TIMEOUT)  # noqa: S310
+            # _IPV4_OPENER maneja http y https (https por IPv4 forzado).
+            resp = _IPV4_OPENER.open(req, timeout=_PUSH_TIMEOUT)  # noqa: S310
             return f"ok:{getattr(resp, 'status', '?')}"
         except Exception as exc:  # noqa: BLE001
             last = f"ERR:{type(exc).__name__}:{str(exc)[:100]}"
             if attempt < _PUSH_ATTEMPTS - 1:
                 time.sleep(1.0 * (attempt + 1))  # backoff 1s, 2s
     return last
+
+
+def _push_telegram(bot_token: str, chat_id: str, title: str, body: str) -> str:
+    """Envía un mensaje por Telegram (api.telegram.org, alcanzable desde Railway
+    cuando ntfy.sh no lo es). Reutiliza el bot que el dueño ya configuró en el
+    agente. Devuelve 'ok:<status>' | 'ERR:<detalle>' (nunca lanza)."""
+    if not bot_token or not chat_id:
+        return "no_telegram"
+    text = f"*{_tg_escape(title)}*\n{_tg_escape(body)}"
+    payload = json.dumps({
+        "chat_id": chat_id, "text": text, "parse_mode": "MarkdownV2",
+        "disable_web_page_preview": True,
+    }).encode("utf-8")
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    last = "ERR:sin_intento"
+    for attempt in range(max(1, _PUSH_ATTEMPTS)):
+        try:
+            req = urllib.request.Request(
+                url, data=payload, method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            resp = _IPV4_OPENER.open(req, timeout=_PUSH_TIMEOUT)  # noqa: S310
+            return f"ok:{getattr(resp, 'status', '?')}"
+        except Exception as exc:  # noqa: BLE001
+            last = f"ERR:{type(exc).__name__}:{str(exc)[:100]}"
+            if attempt < _PUSH_ATTEMPTS - 1:
+                time.sleep(1.0 * (attempt + 1))
+    return last
+
+
+def _tg_escape(s: str) -> str:
+    """Escapa los caracteres reservados de MarkdownV2 de Telegram."""
+    for ch in r"_*[]()~`>#+-=|{}.!":
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
+def _push_alert(cfg: dict, title: str, body: str, *, priority: str, tags: str) -> str:
+    """Enruta una alerta del watchdog al canal disponible de la org: Telegram
+    (preferido — Railway lo alcanza) y, si no, ntfy. Reutiliza la config existente."""
+    bot = (cfg.get("tg_bot_token") or "").strip()
+    chat = (cfg.get("tg_chat_id") or "").strip()
+    if bot and chat:
+        return _push_telegram(bot, chat, title, body)
+    topic = (cfg.get("alert_topic") or "").strip()
+    if topic:
+        return _push_ntfy(topic, title, body, priority=priority, tags=tags)
+    return "no_channel"
 
 
 def _fmt_device(d: dict) -> str:
@@ -461,16 +509,12 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
     # Fase 3: enviar los pushes (FUERA del candado) y confirmar SOLO los que salen.
     push_diag: list[str] = []
     for act in pending:
-        topic = store.get_org_config(act["org"]).get("alert_topic")
-        if not topic:
-            # Sin destino: no se puede avisar → confirmar igual (no reintentar en
-            # bucle una sede cuya org no tiene tema configurado).
-            act["confirm"] = True
-            push_diag.append("no_topic_for_org")
-            continue
-        result = _push_ntfy(topic, act["title"], act["body"],
-                            priority=act["prio"], tags=act["tags"])
-        act["confirm"] = str(result).startswith("ok")
+        cfg = store.get_org_config(act["org"])
+        result = _push_alert(cfg, act["title"], act["body"],
+                             priority=act["prio"], tags=act["tags"])
+        # Sin canal configurado: confirmar igual (no reintentar en bucle una org
+        # sin destino). Con canal: confirmar solo si el envío salió.
+        act["confirm"] = result == "no_channel" or str(result).startswith("ok")
         push_diag.append(result)
     if push_diag:
         _WDIAG["last_push"] = push_diag
@@ -940,15 +984,41 @@ class OrgConfigIn(BaseModel):
     alert_topic: str | None = None  # tema ntfy para alertas por sede
 
 
+class AlertChannelIn(BaseModel):
+    """Canal de alertas del watchdog en la nube. El agente lo reporta desde su
+    integración de Telegram (o el dueño lo fija a mano). El bot_token es secreto:
+    nunca se devuelve por la API."""
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+
+
 @app.get("/v1/org/config")
 def get_org_config(p: Principal = Depends(require_master)) -> dict:
     cfg = store.get_org_config(p.org_token)
-    return {"alert_topic": cfg.get("alert_topic")}
+    return {
+        "alert_topic": cfg.get("alert_topic"),
+        # El token nunca se revela; solo si HAY un canal Telegram configurado.
+        "telegram_set": bool((cfg.get("tg_bot_token") or "").strip()
+                             and (cfg.get("tg_chat_id") or "").strip()),
+        "telegram_chat_id": cfg.get("tg_chat_id"),
+    }
 
 
 @app.post("/v1/org/config")
 def set_org_config(cfg: OrgConfigIn, p: Principal = Depends(require_master)) -> dict:
     store.set_alert_topic(p.org_token, (cfg.alert_topic or "").strip() or None)
+    return {"ok": True}
+
+
+@app.post("/v1/org/alert-channel")
+def set_alert_channel(body: AlertChannelIn, p: Principal = Depends(require_master)) -> dict:
+    """Fija el canal Telegram del watchdog para la org. Lo llama el agente (con el
+    bot que el dueño ya configuró) o el panel. Vacío = lo borra."""
+    store.set_alert_channel(
+        p.org_token,
+        telegram_bot_token=(body.telegram_bot_token or "").strip() or None,
+        telegram_chat_id=(body.telegram_chat_id or "").strip() or None,
+    )
     return {"ok": True}
 
 
