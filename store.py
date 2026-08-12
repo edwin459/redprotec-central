@@ -53,6 +53,8 @@ class Store(Protocol):
     def list_sites(self, org: str) -> list[tuple[str, dict]]: ...
     # TODAS las sedes de TODAS las orgs (solo para el panel de FLOTA del dueño).
     def iter_sites_all(self) -> list[tuple[str, str, dict]]: ...
+    # Da de baja una sede (el dueño la quita del panel). Devuelve True si existía.
+    def remove_site(self, org: str, site_id: str) -> bool: ...
 
     # comandos (cola por sede)
     def enqueue_command(self, org: str, site_id: str, command: dict) -> None: ...
@@ -131,6 +133,13 @@ class MemoryStore:
             return [(org, sid, rec)
                     for org, sites in self._sites.items()
                     for sid, rec in sites.items()]
+
+    def remove_site(self, org: str, site_id: str) -> bool:
+        with self._lock:
+            existed = self._sites.get(org, {}).pop(site_id, None) is not None
+            # Descarta también su cola de comandos (no debe sobrevivir a la sede).
+            self._commands.get(org, {}).pop(site_id, None)
+            return existed
 
     def enqueue_command(self, org, site_id, command) -> None:
         with self._lock:
@@ -422,6 +431,19 @@ class PostgresStore:
                 "remote_admin, updated_at FROM sites")
             rows = cur.fetchall()
         return [(r[0], r[1], self._row_to_site(r[2:])) for r in rows]
+
+    def remove_site(self, org: str, site_id: str) -> bool:
+        with self._connection() as conn, conn.cursor() as cur:
+            # Descarta también la cola de comandos de la sede.
+            cur.execute(
+                "DELETE FROM commands WHERE org_token = %s AND site_id = %s",
+                (org, site_id),
+            )
+            cur.execute(
+                "DELETE FROM sites WHERE org_token = %s AND site_id = %s",
+                (org, site_id),
+            )
+            return cur.rowcount > 0
 
     # ── comandos ──
     def enqueue_command(self, org, site_id, command) -> None:

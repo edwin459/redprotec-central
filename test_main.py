@@ -380,6 +380,38 @@ class CloudRbacTests(unittest.TestCase):
             main.require_admin("Bearer lo-que-sea")
         self.assertEqual(ctx2.exception.status_code, 403)
 
+    # ── Dar de baja una sede (quitarla del panel) ───────────────────────
+    def test_delete_site_removes_it_from_panel(self):
+        master = main._resolve_principal(self.org)
+        self.assertIn("bogota", {s["site_id"] for s in main.list_sites(p=master)["sites"]})
+        out = main.delete_site("bogota", p=master)
+        self.assertTrue(out["ok"])
+        self.assertNotIn("bogota", {s["site_id"] for s in main.list_sites(p=master)["sites"]})
+        # Medellín sigue intacta.
+        self.assertIn("medellin", {s["site_id"] for s in main.list_sites(p=master)["sites"]})
+
+    def test_delete_unknown_site_404(self):
+        master = main._resolve_principal(self.org)
+        with self.assertRaises(HTTPException) as ctx:
+            main.delete_site("no-existe", p=master)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_delete_site_clears_watchdog_state(self):
+        # Una sede eliminada NO debe generar un aviso de "sin conexión" tardío.
+        master = main._resolve_principal(self.org)
+        main._SITE_WATCH.setdefault(self.org, {})["bogota"] = {
+            "state": "online", "since": main._now()}
+        main.delete_site("bogota", p=master)
+        self.assertNotIn("bogota", main._SITE_WATCH.get(self.org, {}))
+
+    def test_scoped_user_cannot_delete_site(self):
+        main._ACCESS[self.org] = {
+            "u": {"name": "U", "role": "siteAdmin", "sites": ["bogota"]}}
+        with self.assertRaises(HTTPException) as ctx:
+            main.delete_site("bogota", p=main.require_master(
+                p=main._resolve_principal("u")))
+        self.assertEqual(ctx.exception.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -58,7 +58,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.8.0", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.8.1", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -720,6 +720,19 @@ def site_detail(site_id: str, p: Principal = Depends(principal)) -> dict:
         p.can("block") or p.can("trust") or p.can("rename")
     )
     return base
+
+
+@app.delete("/v1/sites/{site_id}")
+def delete_site(site_id: str, p: Principal = Depends(require_master)) -> dict:
+    """Da de baja una sede: la quita del panel (y su cola de comandos). Solo el
+    dueño/raíz. También limpia el estado del watchdog para que una sede eliminada
+    no genere un aviso de "sin conexión" tardío."""
+    existed = store.remove_site(p.org_token, site_id)
+    with _WATCH_LOCK:
+        _SITE_WATCH.get(p.org_token, {}).pop(site_id, None)
+    if not existed:
+        raise HTTPException(status_code=404, detail="Sede no encontrada")
+    return {"ok": True}
 
 
 @app.post("/v1/sites/{site_id}/commands")
