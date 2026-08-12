@@ -45,8 +45,12 @@ logger = logging.getLogger("redprotec.central")
 # apagó el agente), NADIE más puede avisarlo a tiempo — el push del agente no
 # saldría porque su propia conexión está caída. El relay sí. Detecta la
 # transición en-línea→sin-conexión y avisa al tema de la organización.
-OFFLINE_ALERT_SECONDS = int(os.environ.get("OFFLINE_ALERT_SECONDS", "210"))
-WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("WATCHDOG_INTERVAL_SECONDS", "60"))
+# 150s (2.5 min) equilibra rapidez y anti-falsas-alarmas: el agente late cada 60s,
+# así que 150s tolera perder UN latido (120s) + margen antes de declarar caída. El
+# vigía revisa cada 30s → detección típica ~2.5-3 min (antes ~5-6). Ajustable por
+# entorno sin redeploy.
+OFFLINE_ALERT_SECONDS = int(os.environ.get("OFFLINE_ALERT_SECONDS", "150"))
+WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("WATCHDOG_INTERVAL_SECONDS", "30"))
 # On-call / Escalación: si nadie CONFIRMA (ack) un incidente de caída, el relay
 # reenvía recordatorios cada vez más urgentes hasta MAX_ESCALATIONS. Así una
 # caída no se "pierde" porque el primer aviso pasó desapercibido — lo que hace
@@ -86,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.7", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.8", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
