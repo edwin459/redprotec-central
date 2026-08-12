@@ -17,11 +17,14 @@ cambia ninguna respuesta: los endpoints hablan solo con la interfaz `Store`.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import secrets
 import threading
 import urllib.request
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -31,7 +34,31 @@ from pydantic import BaseModel, Field
 from auth import verify_supabase_jwt
 from store import create_store
 
-app = FastAPI(title="RedProtec Central Relay", version="0.7.0")
+logger = logging.getLogger("redprotec.central")
+
+# ── Watchdog de sedes: el relay es el ÚNICO que ve TODAS las sedes 24/7 y tiene
+# internet propio. Cuando una sede deja de latir (se le cayó el internet o se
+# apagó el agente), NADIE más puede avisarlo a tiempo — el push del agente no
+# saldría porque su propia conexión está caída. El relay sí. Detecta la
+# transición en-línea→sin-conexión y avisa al tema de la organización.
+OFFLINE_ALERT_SECONDS = int(os.environ.get("OFFLINE_ALERT_SECONDS", "210"))
+WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("WATCHDOG_INTERVAL_SECONDS", "60"))
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(_watchdog_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="RedProtec Central Relay", version="0.8.0", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -63,6 +90,13 @@ _ORG_CONFIG: dict[str, dict] = {}
 # lista al abrir (PUT /v1/access), así se restaura si el host reinicia. Si se
 # pierde, un token de usuario deja de resolver → falla CERRADO (seguro).
 _ACCESS: dict[str, dict[str, dict]] = {}
+# org_token -> site_id -> { state: "online"|"offline", since: datetime }
+# Estado del watchdog de conexión por sede (en memoria). Tras un reinicio del
+# relay se re-siembra solo en el primer tick (sin avisar), evitando spam. Usa su
+# PROPIO lock: el `_LOCK` del store no es reentrante y el store lo toma solo,
+# así que mezclarlos deadlockearía.
+_SITE_WATCH: dict[str, dict[str, dict]] = {}
+_WATCH_LOCK = threading.Lock()
 
 # Almacén activo. Con DATABASE_URL → Postgres (Supabase, persistente). Sin ella →
 # MemoryStore sobre LOS MISMOS dicts de arriba (fallback gratis + tests). Los
@@ -230,6 +264,133 @@ def _down_criticals(devs: list[dict] | None) -> dict[str, dict]:
         for d in (devs or [])
         if d.get("is_critical") and not d.get("online") and d.get("mac")
     }
+
+
+# ─────────────────────── watchdog de conexión por sede ───────────────────────
+def decide_site_transition(
+    prev_state: str | None, seconds_since_update: float, offline_threshold: int
+) -> tuple[str, str | None]:
+    """Máquina de estados PURA del watchdog. Devuelve (nuevo_estado, evento) con
+    evento ∈ {None, 'down', 'up'}.
+
+    - Sin estado previo (relay recién arrancado) → siembra SIN avisar (evita spam
+      de "se cayó" en cada reinicio del relay).
+    - en-línea → sin-conexión = 'down'; sin-conexión → en-línea = 'up'.
+    """
+    offline = seconds_since_update > offline_threshold
+    current = "offline" if offline else "online"
+    if prev_state is None:
+        return current, None
+    if prev_state == "online" and offline:
+        return "offline", "down"
+    if prev_state == "offline" and not offline:
+        return "online", "up"
+    return prev_state, None
+
+
+def _humanize_seconds(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 90:
+        return f"{int(round(seconds))} seg"
+    minutes = seconds / 60.0
+    if minutes < 90:
+        return f"{int(round(minutes))} min"
+    hours = minutes / 60.0
+    if hours < 36:
+        return f"{int(round(hours))} h"
+    return f"{int(round(hours / 24.0))} d"
+
+
+def compose_site_down_message(site_name: str) -> tuple[str, str]:
+    return (
+        f"RedProtec — {site_name}: sin conexión",
+        f"🔴 «{site_name}» dejó de reportar. Puede ser una caída de internet o que "
+        f"el agente se apagó. Te avisamos apenas vuelva.",
+    )
+
+
+def compose_site_up_message(site_name: str, down_seconds: float) -> tuple[str, str]:
+    dur = _humanize_seconds(down_seconds)
+    return (
+        f"RedProtec — {site_name}: de vuelta en línea",
+        f"✅ «{site_name}» volvió a reportar. Estuvo sin conexión {dur}.",
+    )
+
+
+def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
+    """Revisa TODAS las sedes y avisa las transiciones de conexión. Devuelve la
+    lista de (org, site_id, evento) emitidos (para pruebas). Los pushes se envían
+    fuera de todo candado (I/O de red)."""
+    # Fase 1: leer del store (el store toma su PROPIO lock; no anidar con el
+    # nuestro para no deadlockear).
+    sites = [
+        (org, site_id, rec) for org, site_id, rec in store.iter_sites_all()
+    ]
+
+    to_push: list[tuple[str, str, str, str, str]] = []  # topic,title,body,prio,tags
+    emitted: list[tuple[str, str, str]] = []
+
+    # Fase 2: decidir transiciones y actualizar el estado del watchdog.
+    with _WATCH_LOCK:
+        for org, site_id, rec in sites:
+            updated = rec.get("updated_at")
+            if updated is None:
+                continue
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            delta = (now - updated).total_seconds()
+
+            org_watch = _SITE_WATCH.setdefault(org, {})
+            prev = org_watch.get(site_id)
+            prev_state = prev.get("state") if prev else None
+            new_state, event = decide_site_transition(
+                prev_state, delta, OFFLINE_ALERT_SECONDS
+            )
+
+            if event == "down":
+                org_watch[site_id] = {"state": "offline", "since": now}
+                title, body = compose_site_down_message(rec.get("site_name") or site_id)
+                to_push.append((org, title, body, "high", "rotating_light"))
+                emitted.append((org, site_id, event))
+            elif event == "up":
+                down_since = (prev or {}).get("since")
+                down_secs = (
+                    (now - down_since).total_seconds()
+                    if isinstance(down_since, datetime)
+                    else 0.0
+                )
+                org_watch[site_id] = {"state": "online", "since": now}
+                title, body = compose_site_up_message(
+                    rec.get("site_name") or site_id, down_secs
+                )
+                to_push.append((org, title, body, "default", "white_check_mark"))
+                emitted.append((org, site_id, event))
+            else:
+                # Sembrado inicial o sin cambio: solo persistir el estado.
+                org_watch[site_id] = {
+                    "state": new_state,
+                    "since": (prev or {}).get("since", now),
+                }
+
+    # Fase 3: resolver el tema de cada org (store) y enviar los pushes.
+    for org, title, body, prio, tags in to_push:
+        topic = store.get_org_config(org).get("alert_topic")
+        if topic:
+            _push_ntfy(topic, title, body, priority=prio, tags=tags)
+    return emitted
+
+
+async def _watchdog_loop() -> None:
+    """Bucle de fondo: cada WATCHDOG_INTERVAL_SECONDS revisa las sedes. Nunca
+    lanza: un fallo del tick no debe tumbar el relay."""
+    while True:
+        try:
+            await asyncio.to_thread(_watchdog_tick, _now())
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("Fallo en el watchdog de sedes")
+        await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
 
 
 # ─────────────────────────── modelos ───────────────────────────
