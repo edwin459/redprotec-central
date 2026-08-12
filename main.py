@@ -80,7 +80,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.3", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.4", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -570,6 +570,11 @@ class DeviceEntry(BaseModel):
     trust: str = "unknown"  # trusted | unknown | blocked
     is_critical: bool = False
     owner: str | None = None  # responsable del equipo en la sede
+    # Consumo real en vivo (bytes/seg) y área/departamento del equipo. Viajan
+    # para el mapa "Centro de mando" (consumo por equipo) y agrupación por área.
+    # Sin estos campos, model_dump() los descartaría y nunca llegarían a la app.
+    bytes_per_sec: float | None = None
+    area: str | None = None
 
 
 class Heartbeat(BaseModel):
@@ -1075,6 +1080,114 @@ def insights(p: Principal = Depends(principal)) -> dict:
     ]
     roaming.sort(key=lambda r: -r["site_count"])
     return {"roaming_unknowns": roaming, "generated_at": now.isoformat()}
+
+
+def _is_private_mac(mac: str) -> bool:
+    """MAC localmente administrada (privada/aleatoria): 2º nibble ∈ {2,6,A,E}.
+    Señal de un equipo que oculta su identidad (evasivo)."""
+    h = mac.replace(":", "").replace("-", "").upper()
+    return len(h) >= 2 and h[1] in {"2", "6", "A", "E"}
+
+
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+@app.get("/v1/threats")
+def fleet_threats(p: Principal = Depends(principal)) -> dict:
+    """**Centro de Amenazas de Flota** (diferenciador multi-sede): correlaciona el
+    inventario de TODAS las sedes del alcance de quien llama y clasifica amenazas
+    que solo se ven con visión de flota — sin duplicar motores, reusa lo que las
+    sedes ya reportan (trust/mac/vendor):
+
+    - `known_bad_roaming` (crítica): un equipo BLOQUEADO en una sede aparece en
+      otra(s) → el mismo intruso saltando de sede.
+    - `roaming_unknown` (alta): un desconocido con la misma MAC en 2+ sedes.
+    - `evasive_unknown` (media): desconocido con MAC privada/aleatoria (se oculta).
+    - `blocked` (baja): bloqueo activo (informativo).
+    """
+    now = _now()
+    # mac -> agregado entre sedes.
+    agg: dict[str, dict] = {}
+    sites_seen: set[str] = set()
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        sites_seen.add(site_id)
+        for d in (rec.get("devices") or []):
+            mac = (d.get("mac") or "").upper()
+            if not mac:
+                continue
+            e = agg.setdefault(mac, {
+                "name": d.get("name") or mac, "vendor": d.get("vendor"),
+                "sites": [], "trusts": set(),
+            })
+            if not e.get("vendor") and d.get("vendor"):
+                e["vendor"] = d.get("vendor")
+            trust = d.get("trust") or "unknown"
+            e["sites"].append({
+                "site_id": site_id, "site_name": rec["site_name"],
+                "trust": trust, "online": bool(d.get("online")),
+            })
+            e["trusts"].add(trust)
+
+    threats: list[dict] = []
+    for mac, e in agg.items():
+        site_names = sorted({s["site_name"] for s in e["sites"]})
+        n_sites = len(site_names)
+        trusts = e["trusts"]
+        blocked = "blocked" in trusts
+        unknown = "unknown" in trusts
+        # Presente (no bloqueado) en alguna sede además de estar bloqueado en otra.
+        present_elsewhere = any(s["trust"] != "blocked" for s in e["sites"])
+
+        if blocked and present_elsewhere and n_sites >= 2:
+            sev, typ = "critical", "known_bad_roaming"
+            title = "Equipo vetado apareció en otra sede"
+            detail = (f"«{e['name']}» está BLOQUEADO en una sede pero aparece en "
+                      f"{n_sites} sedes. Es el mismo equipo saltando de sede.")
+            reco = "Bloquéalo en todas las sedes donde aparece."
+        elif unknown and n_sites >= 2:
+            sev, typ = "high", "roaming_unknown"
+            title = "Intruso itinerante"
+            detail = (f"«{e['name']}» (desconocido) aparece en {n_sites} sedes con "
+                      f"la misma identidad. Un mismo desconocido en varias sedes "
+                      f"es sospechoso.")
+            reco = "Identifícalo (¿es tuyo?) o bloquéalo en la flota."
+        elif unknown and _is_private_mac(mac):
+            sev, typ = "medium", "evasive_unknown"
+            title = "Desconocido evasivo (MAC privada)"
+            detail = (f"«{e['name']}» usa MAC privada/aleatoria y no está "
+                      f"identificado: dificulta el rastreo.")
+            reco = "Verifica de quién es; si no lo reconoces, bloquéalo."
+        elif blocked:
+            sev, typ = "low", "blocked"
+            title = "Bloqueo activo"
+            detail = f"«{e['name']}» está bloqueado en {n_sites} sede(s)."
+            reco = "Sin acción: vigilancia."
+        else:
+            continue
+
+        threats.append({
+            "id": mac,
+            "type": typ,
+            "severity": sev,
+            "mac": mac,
+            "name": e["name"],
+            "vendor": e.get("vendor"),
+            "sites": e["sites"],
+            "site_names": site_names,
+            "site_count": n_sites,
+            "title": title,
+            "detail": detail,
+            "recommendation": reco,
+        })
+
+    threats.sort(key=lambda t: (_SEV_RANK.get(t["severity"], 9), -t["site_count"]))
+    summary = {"critical": 0, "high": 0, "medium": 0, "low": 0,
+               "total": len(threats), "sites": len(sites_seen)}
+    for t in threats:
+        summary[t["severity"]] = summary.get(t["severity"], 0) + 1
+    return {"threats": threats, "summary": summary, "generated_at": now.isoformat()}
 
 
 @app.get("/v1/inventory")

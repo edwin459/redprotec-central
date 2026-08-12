@@ -413,5 +413,58 @@ class CloudRbacTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 403)
 
 
+class FleetThreatsTests(unittest.TestCase):
+    """Centro de Amenazas de Flota (/v1/threats): clasificación cruzada de sedes."""
+
+    def setUp(self):
+        main._STORE.clear()
+        main._ACCESS.clear()
+        self.org = "org-threats-token-abcd"
+
+    def _threats(self):
+        return main.fleet_threats(p=main._resolve_principal(self.org))
+
+    def test_classifies_all_threat_types(self):
+        # bogotá: intruso vetado, itinerante, evasivo (MAC privada), bloqueo local.
+        _seed_site(self.org, "bogota", "Bogotá", devices=[
+            {"mac": "AA:BB:CC:00:00:01", "name": "Vetado", "trust": "blocked", "online": False},
+            {"mac": "11:22:33:44:55:66", "name": "Rondador", "trust": "unknown", "online": True},
+            {"mac": "A6:00:00:00:00:99", "name": "Fantasma", "trust": "unknown", "online": True},
+            {"mac": "00:11:22:33:44:55", "name": "SoloBloqueado", "trust": "blocked", "online": False},
+        ])
+        # medellín: el vetado y el rondador reaparecen.
+        _seed_site(self.org, "medellin", "Medellín", devices=[
+            {"mac": "AA:BB:CC:00:00:01", "name": "Vetado", "trust": "unknown", "online": True},
+            {"mac": "11:22:33:44:55:66", "name": "Rondador", "trust": "unknown", "online": True},
+        ])
+        out = self._threats()
+        by_mac = {t["mac"]: t for t in out["threats"]}
+        self.assertEqual(by_mac["AA:BB:CC:00:00:01"]["type"], "known_bad_roaming")
+        self.assertEqual(by_mac["AA:BB:CC:00:00:01"]["severity"], "critical")
+        self.assertEqual(by_mac["11:22:33:44:55:66"]["type"], "roaming_unknown")
+        self.assertEqual(by_mac["11:22:33:44:55:66"]["severity"], "high")
+        self.assertEqual(by_mac["A6:00:00:00:00:99"]["type"], "evasive_unknown")
+        self.assertEqual(by_mac["00:11:22:33:44:55"]["type"], "blocked")
+        # Resumen coherente y orden por severidad (crítica primero).
+        self.assertEqual(out["summary"]["critical"], 1)
+        self.assertEqual(out["summary"]["high"], 1)
+        self.assertEqual(out["summary"]["total"], 4)
+        self.assertEqual(out["summary"]["sites"], 2)
+        self.assertEqual(out["threats"][0]["severity"], "critical")
+
+    def test_scope_filters_threats(self):
+        # Un usuario con alcance a una sola sede no ve amenazas de otra.
+        _seed_site(self.org, "bogota", "Bogotá", devices=[
+            {"mac": "11:22:33:44:55:66", "name": "X", "trust": "unknown", "online": True}])
+        _seed_site(self.org, "medellin", "Medellín", devices=[
+            {"mac": "11:22:33:44:55:66", "name": "X", "trust": "unknown", "online": True}])
+        main._ACCESS[self.org] = {
+            "u-bog": {"name": "Ana", "role": "auditor", "sites": ["bogota"]}}
+        scoped = main.fleet_threats(p=main._resolve_principal("u-bog"))
+        # Solo ve una sede → el itinerante deja de serlo (no hay correlación cruzada).
+        roaming = [t for t in scoped["threats"] if t["type"] == "roaming_unknown"]
+        self.assertEqual(roaming, [])
+
+
 if __name__ == "__main__":
     unittest.main()
