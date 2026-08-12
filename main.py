@@ -79,7 +79,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.1", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.2", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -1015,17 +1015,23 @@ def test_alert(p: Principal = Depends(require_master)) -> dict:
     """Envía una alerta de PRUEBA por el canal configurado de la org (Telegram o
     ntfy) y devuelve el resultado del envío. Sirve para que el dueño verifique
     'de una' que las alertas del watchdog en la nube le llegan."""
-    cfg = store.get_org_config(p.org_token)
-    result = _push_alert(
-        cfg,
-        "RedProtec: prueba de alertas",
-        "✅ Si ves este mensaje, el vigía en la nube puede avisarte. "
-        "Te llegará así si una sede pierde internet.",
-        priority="default", tags="white_check_mark",
-    )
-    channel = ("telegram" if (cfg.get("tg_bot_token") and cfg.get("tg_chat_id"))
-               else "ntfy" if cfg.get("alert_topic") else "none")
-    return {"channel": channel, "result": result, "ok": str(result).startswith("ok")}
+    try:
+        cfg = store.get_org_config(p.org_token)
+        channel = ("telegram" if (cfg.get("tg_bot_token") and cfg.get("tg_chat_id"))
+                   else "ntfy" if cfg.get("alert_topic") else "none")
+        result = _push_alert(
+            cfg,
+            "RedProtec: prueba de alertas",
+            "✅ Si ves este mensaje, el vigía en la nube puede avisarte. "
+            "Te llegará así si una sede pierde internet.",
+            priority="default", tags="white_check_mark",
+        )
+        return {"channel": channel, "result": result,
+                "ok": str(result).startswith("ok")}
+    except Exception as exc:  # noqa: BLE001 - diagnóstico: no queremos un 500 opaco
+        import traceback
+        return {"channel": "error", "result": f"{type(exc).__name__}: {exc}",
+                "ok": False, "trace": traceback.format_exc()[-600:]}
 
 
 @app.post("/v1/org/alert-channel")
