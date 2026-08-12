@@ -598,5 +598,80 @@ class AuditLogTests(unittest.TestCase):
         self.assertEqual(main.audit(p=other)["entries"], [])
 
 
+class PlaybooksTests(unittest.TestCase):
+    """Motor de automatización: reglas 'sugerir' vs 'auto', cooldown, aprobar."""
+
+    def setUp(self):
+        main._STORE.clear()
+        for attr in ("_kv", "_audit"):
+            if hasattr(main.store, attr):
+                getattr(main.store, attr).clear()
+        self.org = "org-pb-token-1"
+        main._STORE.setdefault(self.org, {})["s1"] = {
+            "site_name": "S1",
+            "summary": main.SiteSummary(alerts=2, criticals_down=1).model_dump(),
+            "devices": [{"mac": "AA:BB", "trust": "unknown"},
+                        {"mac": "CC:DD", "trust": "trusted"}],
+            "remote_admin": True, "updated_at": main._now()}
+
+    def tearDown(self):
+        main._STORE.clear()
+        for attr in ("_kv", "_audit"):
+            if hasattr(main.store, attr):
+                getattr(main.store, attr).clear()
+
+    def _rule(self, condition, action, mode):
+        main.set_playbooks(
+            main.PlaybooksIn(rules=[main.PlaybookRule(
+                name="R", condition=condition, action=action, mode=mode)]),
+            p=main._resolve_principal(self.org))
+
+    def test_suggest_creates_pending_then_approve_executes(self):
+        self._rule("intruders", "block_unknowns", "suggest")
+        main._evaluate_playbooks(main._now())
+        p = main._resolve_principal(self.org)
+        pend = main.playbooks_pending(p=p)["pending"]
+        self.assertEqual(len(pend), 1)
+        self.assertEqual(pend[0]["action"], "block_unknowns")
+        out = main.approve_pending(pend[0]["id"], p=p)
+        self.assertTrue(out["ok"])
+        self.assertEqual(main.playbooks_pending(p=p)["pending"], [])  # se quitó
+
+    def test_auto_executes_and_audits(self):
+        self._rule("intruders", "notify", "auto")
+        fired = main._evaluate_playbooks(main._now())
+        self.assertTrue(any(m == "auto" for _, _, m in fired))
+        rows = main.audit(p=main._resolve_principal(self.org))["entries"]
+        self.assertTrue(any("playbook_auto" in r["action"] for r in rows))
+
+    def test_cooldown_prevents_duplicate_pending(self):
+        self._rule("intruders", "notify", "suggest")
+        main._evaluate_playbooks(main._now())
+        p = main._resolve_principal(self.org)
+        n1 = len(main.playbooks_pending(p=p)["pending"])
+        main._evaluate_playbooks(main._now())
+        n2 = len(main.playbooks_pending(p=p)["pending"])
+        self.assertEqual(n1, 1)
+        self.assertEqual(n2, 1)  # ni duplica ni re-dispara
+
+    def test_invalid_condition_rejected(self):
+        with self.assertRaises(HTTPException) as ctx:
+            main.set_playbooks(
+                main.PlaybooksIn(rules=[main.PlaybookRule(
+                    name="X", condition="bogus", action="notify", mode="auto")]),
+                p=main._resolve_principal(self.org))
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_disabled_rule_does_not_fire(self):
+        main.set_playbooks(
+            main.PlaybooksIn(rules=[main.PlaybookRule(
+                name="Off", condition="intruders", action="notify",
+                mode="suggest", enabled=False)]),
+            p=main._resolve_principal(self.org))
+        main._evaluate_playbooks(main._now())
+        self.assertEqual(
+            main.playbooks_pending(p=main._resolve_principal(self.org))["pending"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

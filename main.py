@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.10", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.11", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -656,6 +656,140 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
     return emitted
 
 
+# ─────────────────── Playbooks (automatización: si-X-haz-Y) ───────────────────
+# Motor AISLADO del watchdog (se evalúa aparte, envuelto en try/except) para no
+# arriesgar la fiabilidad de la detección/entrega de caídas, ya validada.
+PB_COOLDOWN_SECONDS = int(os.environ.get("PB_COOLDOWN_SECONDS", "1800"))  # 30 min
+_COND_LABEL = {
+    "intruders": "hay equipos desconocidos",
+    "critical_down": "un activo crítico está caído",
+    "site_down": "la sede está sin conexión",
+}
+_ACTION_LABEL = {"notify": "avisar", "block_unknowns": "bloquear desconocidos"}
+_PB_CONDITIONS = set(_COND_LABEL)
+_PB_ACTIONS = set(_ACTION_LABEL)
+
+
+def _pb_rules(org: str) -> list[dict]:
+    raw = store.kv_get(f"playbooks::{org}")
+    return json.loads(raw) if raw else []
+
+
+def _pb_set_rules(org: str, rules: list[dict]) -> None:
+    store.kv_set(f"playbooks::{org}", json.dumps(rules))
+
+
+def _pb_pending(org: str) -> list[dict]:
+    raw = store.kv_get(f"pb_pending::{org}")
+    return json.loads(raw) if raw else []
+
+
+def _pb_set_pending(org: str, items: list[dict]) -> None:
+    store.kv_set(f"pb_pending::{org}", json.dumps(items))
+
+
+def _pb_condition_met(cond: str, summ: dict, online: bool) -> bool:
+    if cond == "intruders":
+        return int(summ.get("alerts", 0) or 0) > 0
+    if cond == "critical_down":
+        return int(summ.get("criticals_down", 0) or 0) > 0
+    if cond == "site_down":
+        return not online
+    return False
+
+
+def _pb_execute(org: str, site_id: str, rec: dict, action: str, detail: str) -> str:
+    """Ejecuta la acción de un playbook. Reutiliza el canal de alertas y la cola
+    de comandos existentes. Devuelve un resumen de lo hecho (para la bitácora)."""
+    if action == "notify":
+        cfg = store.get_org_config(org)
+        _push_alert(cfg, f"RedProtec — Automatización: {rec.get('site_name') or site_id}",
+                    f"🤖 {detail}", priority="high", tags="robot")
+        return "avisado"
+    if action == "block_unknowns":
+        if not rec.get("remote_admin"):
+            return "sede sin administración remota"
+        n = 0
+        for d in (rec.get("devices") or []):
+            if d.get("trust") == "unknown" and d.get("mac"):
+                store.enqueue_command(org, site_id, {
+                    "id": uuid.uuid4().hex[:12], "action": "block",
+                    "mac": d["mac"], "value": None, "created_at": _now()})
+                n += 1
+        return f"{n} desconocido(s) bloqueado(s)"
+    return "sin acción"
+
+
+def _evaluate_playbooks(now: datetime) -> list[tuple[str, str, str]]:
+    """Evalúa las reglas de cada organización contra el estado actual de sus
+    sedes. `auto` ejecuta y audita; `suggest` deja una recomendación pendiente.
+    Cooldown por (regla, sede) para no repetir. Devuelve (org, rule_id, mode)
+    disparados (para pruebas)."""
+    fired: list[tuple[str, str, str]] = []
+    # Agrupa sedes por org una sola vez.
+    by_org: dict[str, list[tuple[str, dict]]] = {}
+    for org, site_id, rec in store.iter_sites_all():
+        by_org.setdefault(org, []).append((site_id, rec))
+    for org, sites in by_org.items():
+        rules = _pb_rules(org)
+        if not rules:
+            continue
+        raw_cd = store.kv_get(f"pb_cd::{org}")
+        cds = json.loads(raw_cd) if raw_cd else {}
+        changed = False
+        pending_dirty = False
+        pending = _pb_pending(org)
+        for site_id, rec in sites:
+            summ = rec.get("summary") or {}
+            updated = rec.get("updated_at")
+            online = updated is not None and (
+                now - updated).total_seconds() <= ONLINE_WINDOW_SECONDS
+            for r in rules:
+                if not r.get("enabled", True):
+                    continue
+                if not _pb_condition_met(r.get("condition"), summ, online):
+                    continue
+                key = f"{r.get('id')}:{site_id}"
+                last = cds.get(key)
+                if last:
+                    try:
+                        if (now - datetime.fromisoformat(last)).total_seconds() < PB_COOLDOWN_SECONDS:
+                            continue
+                    except Exception:  # noqa: BLE001
+                        pass
+                name = r.get("name") or _COND_LABEL.get(r.get("condition"), "regla")
+                detail = (f"«{name}»: {_COND_LABEL.get(r.get('condition'), r.get('condition'))} "
+                          f"en {rec.get('site_name') or site_id} → "
+                          f"{_ACTION_LABEL.get(r.get('action'), r.get('action'))}")
+                if r.get("mode") == "auto":
+                    res = _pb_execute(org, site_id, rec, r.get("action"), detail)
+                    try:
+                        store.record_audit(org, "Automatización",
+                                           f"playbook_auto:{r.get('action')}",
+                                           site_id, f"{detail} ({res})", now)
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:  # suggest → recomendación pendiente (dedup por regla+sede)
+                    if not any(it.get("rule_id") == r.get("id")
+                               and it.get("site_id") == site_id for it in pending):
+                        pending.append({
+                            "id": uuid.uuid4().hex[:10], "rule_id": r.get("id"),
+                            "rule_name": name, "site_id": site_id,
+                            "site_name": rec.get("site_name") or site_id,
+                            "action": r.get("action"), "detail": detail,
+                            "created_at": now.isoformat(),
+                        })
+                        pending_dirty = True
+                cds[key] = now.isoformat()
+                changed = True
+                fired.append((org, str(r.get("id")), r.get("mode", "suggest")))
+        if pending_dirty:
+            _pb_set_pending(org, pending)
+        if changed:
+            store.kv_set(f"pb_cd::{org}", json.dumps(cds))
+    return fired
+
+
 async def _watchdog_loop() -> None:
     """Bucle de fondo: cada WATCHDOG_INTERVAL_SECONDS revisa las sedes. Nunca
     lanza: un fallo del tick no debe tumbar el relay."""
@@ -670,6 +804,13 @@ async def _watchdog_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             _WDIAG["last_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
             logger.exception("Fallo en el watchdog de sedes")
+        # Playbooks: AISLADO del tick (su fallo nunca afecta la detección/entrega).
+        try:
+            await asyncio.to_thread(_evaluate_playbooks, _now())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Fallo evaluando playbooks: %s", exc)
         await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
 
 
@@ -1529,6 +1670,84 @@ def audit(limit: int = 100, p: Principal = Depends(principal)) -> dict:
         "at": r["at"].isoformat() if hasattr(r["at"], "isoformat") else str(r["at"]),
     } for r in rows]
     return {"entries": out, "generated_at": _now().isoformat()}
+
+
+class PlaybookRule(BaseModel):
+    id: str = Field(default="", max_length=32)
+    name: str = Field(default="", max_length=80)
+    condition: str
+    action: str
+    mode: str = "suggest"   # suggest | auto
+    enabled: bool = True
+
+
+class PlaybooksIn(BaseModel):
+    rules: list[PlaybookRule] = Field(default_factory=list)
+
+
+@app.get("/v1/playbooks")
+def get_playbooks(p: Principal = Depends(require_master)) -> dict:
+    """Reglas de automatización de la organización (solo el dueño las gestiona)."""
+    return {"rules": _pb_rules(p.org_token),
+            "conditions": sorted(_PB_CONDITIONS), "actions": sorted(_PB_ACTIONS)}
+
+
+@app.put("/v1/playbooks")
+def set_playbooks(body: PlaybooksIn, p: Principal = Depends(require_master)) -> dict:
+    """**Reemplaza** las reglas (la app es la fuente de verdad). Valida condición/
+    acción/modo y asigna id a las nuevas. Idempotente."""
+    out: list[dict] = []
+    for r in body.rules:
+        if r.condition not in _PB_CONDITIONS:
+            raise HTTPException(status_code=400, detail=f"Condición inválida: {r.condition}")
+        if r.action not in _PB_ACTIONS:
+            raise HTTPException(status_code=400, detail=f"Acción inválida: {r.action}")
+        if r.mode not in ("suggest", "auto"):
+            raise HTTPException(status_code=400, detail=f"Modo inválido: {r.mode}")
+        out.append({
+            "id": r.id or uuid.uuid4().hex[:10], "name": r.name,
+            "condition": r.condition, "action": r.action,
+            "mode": r.mode, "enabled": bool(r.enabled),
+        })
+    _pb_set_rules(p.org_token, out)
+    _audit(p, "playbooks_update", "automatización", f"Guardó {len(out)} regla(s)")
+    return {"ok": True, "rules": out}
+
+
+@app.get("/v1/playbooks/pending")
+def playbooks_pending(p: Principal = Depends(principal)) -> dict:
+    """Recomendaciones PENDIENTES (reglas en modo «sugerir» que se dispararon) del
+    alcance de quien llama, para aprobarlas o descartarlas."""
+    items = [it for it in _pb_pending(p.org_token) if p.sees_site(it.get("site_id"))]
+    return {"pending": items, "generated_at": _now().isoformat()}
+
+
+@app.post("/v1/playbooks/pending/{item_id}/approve")
+def approve_pending(item_id: str, p: Principal = Depends(principal)) -> dict:
+    """Aprueba una recomendación → EJECUTA su acción ahora y la quita de pendientes."""
+    items = _pb_pending(p.org_token)
+    target = next((it for it in items if it.get("id") == item_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Recomendación no encontrada")
+    if not p.sees_site(target.get("site_id")):
+        raise HTTPException(status_code=403, detail="Sede fuera de tu alcance")
+    rec = store.get_site(p.org_token, target["site_id"])
+    res = _pb_execute(p.org_token, target["site_id"], rec or {},
+                      target.get("action"), target.get("detail", "")) if rec else "sede no encontrada"
+    _audit(p, f"playbook_approve:{target.get('action')}", target.get("site_id"),
+           f"{target.get('detail','')} ({res})")
+    _pb_set_pending(p.org_token, [it for it in items if it.get("id") != item_id])
+    return {"ok": True, "result": res}
+
+
+@app.post("/v1/playbooks/pending/{item_id}/dismiss")
+def dismiss_pending(item_id: str, p: Principal = Depends(principal)) -> dict:
+    """Descarta una recomendación sin ejecutarla."""
+    items = _pb_pending(p.org_token)
+    if not any(it.get("id") == item_id for it in items):
+        raise HTTPException(status_code=404, detail="Recomendación no encontrada")
+    _pb_set_pending(p.org_token, [it for it in items if it.get("id") != item_id])
+    return {"ok": True}
 
 
 @app.get("/v1/inventory")
