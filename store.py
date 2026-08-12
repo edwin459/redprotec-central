@@ -62,6 +62,11 @@ class Store(Protocol):
     def site_events(self, org: str, since: datetime,
                     site_id: str | None = None) -> list[dict]: ...
 
+    # bitácora de auditoría (quién hizo qué): acciones sensibles por organización.
+    def record_audit(self, org: str, actor: str, action: str, target: str,
+                     detail: str, at: datetime) -> None: ...
+    def list_audit(self, org: str, limit: int) -> list[dict]: ...
+
     # comandos (cola por sede)
     def enqueue_command(self, org: str, site_id: str, command: dict) -> None: ...
     def pending_commands(self, org: str, site_id: str,
@@ -114,6 +119,7 @@ class MemoryStore:
         self._entitlements: dict[str, dict] = {}  # org -> {plan, trial_ends_at}
         self._kv: dict[str, str] = {}             # clave/valor singleton (RAM)
         self._events: list[dict] = []             # SLA: eventos down/up (RAM)
+        self._audit: list[dict] = []              # bitácora de auditoría (RAM)
         self._lock = lock or threading.Lock()
 
     def stats(self) -> tuple[int, int]:
@@ -168,6 +174,23 @@ class MemoryStore:
                 if e["org"] == org and e["at"] >= since
                 and (site_id is None or e["site_id"] == site_id)
             ]
+
+    def record_audit(self, org, actor, action, target, detail, at) -> None:
+        with self._lock:
+            self._audit.append({"org": org, "actor": actor, "action": action,
+                                "target": target, "detail": detail, "at": at})
+            if len(self._audit) > 20000:
+                self._audit = self._audit[-20000:]
+
+    def list_audit(self, org, limit) -> list[dict]:
+        with self._lock:
+            rows = [e for e in self._audit if e["org"] == org]
+        rows.sort(key=lambda e: e["at"], reverse=True)  # más reciente primero
+        return [
+            {"actor": e["actor"], "action": e["action"], "target": e["target"],
+             "detail": e["detail"], "at": e["at"]}
+            for e in rows[:max(1, limit)]
+        ]
 
     def enqueue_command(self, org, site_id, command) -> None:
         with self._lock:
@@ -307,6 +330,19 @@ CREATE TABLE IF NOT EXISTS site_events (
 );
 CREATE INDEX IF NOT EXISTS site_events_org_at_idx
     ON site_events (org_token, at);
+
+-- Bitácora de auditoría (quién hizo qué): acciones sensibles por organización.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         bigserial   PRIMARY KEY,
+    org_token  text        NOT NULL,
+    actor      text        NOT NULL DEFAULT '',
+    action     text        NOT NULL,
+    target     text        NOT NULL DEFAULT '',
+    detail     text        NOT NULL DEFAULT '',
+    at         timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS audit_log_org_at_idx
+    ON audit_log (org_token, at DESC);
 
 CREATE TABLE IF NOT EXISTS org_config (
     org_token    text PRIMARY KEY,
@@ -520,6 +556,25 @@ class PostgresStore:
                 )
             return [{"site_id": r[0], "event": r[1], "at": r[2]}
                     for r in cur.fetchall()]
+
+    # ── bitácora de auditoría ──
+    def record_audit(self, org, actor, action, target, detail, at) -> None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO audit_log (org_token, actor, action, target, detail, at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (org, actor, action, target, detail, at),
+            )
+
+    def list_audit(self, org, limit) -> list[dict]:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT actor, action, target, detail, at FROM audit_log "
+                "WHERE org_token = %s ORDER BY at DESC LIMIT %s",
+                (org, max(1, int(limit))),
+            )
+            return [{"actor": r[0], "action": r[1], "target": r[2],
+                     "detail": r[3], "at": r[4]} for r in cur.fetchall()]
 
     # ── comandos ──
     def enqueue_command(self, org, site_id, command) -> None:

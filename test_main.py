@@ -566,5 +566,37 @@ class PartnerConsoleTests(unittest.TestCase):
         self.assertFalse(out["fleet"][0]["online"])  # sin sedes → offline, no invisible
 
 
+class AuditLogTests(unittest.TestCase):
+    """Bitácora de auditoría: los comandos remotos quedan registrados por org."""
+
+    def setUp(self):
+        main._STORE.clear()
+        if hasattr(main.store, "_audit"):
+            main.store._audit.clear()
+        self.org = "org-audit-token-1"
+        main._STORE.setdefault(self.org, {})["s1"] = {
+            "site_name": "S1", "summary": main.SiteSummary().model_dump(),
+            "devices": [], "remote_admin": True, "updated_at": main._now()}
+
+    def tearDown(self):
+        main._STORE.clear()
+        if hasattr(main.store, "_audit"):
+            main.store._audit.clear()
+
+    def test_command_is_audited(self):
+        p = main._resolve_principal(self.org)
+        main.enqueue_command("s1", main.CommandIn(action="block", mac="AA:BB"), p=p)
+        rows = main.audit(p=p)["entries"]
+        self.assertTrue(any(r["action"] == "command:block" for r in rows))
+        self.assertTrue(any("AA:BB" in r["target"] for r in rows))
+        self.assertIn("at", rows[0])
+
+    def test_audit_is_scoped_per_org(self):
+        p = main._resolve_principal(self.org)
+        main.enqueue_command("s1", main.CommandIn(action="trust", mac="CC:DD"), p=p)
+        other = main._resolve_principal("org-otra-audit-9")
+        self.assertEqual(main.audit(p=other)["entries"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

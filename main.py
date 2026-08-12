@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.9", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.10", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -1096,6 +1096,9 @@ def enqueue_command(
         "created_at": now,
     }
     store.enqueue_command(p.org_token, site_id, command)
+    _audit(p, f"command:{cmd.action}", f"{site_id}/{cmd.mac}",
+           f"Comando remoto «{cmd.action}»"
+           + (f" = {cmd.value}" if cmd.value else ""))
     return {"ok": True, "command_id": command["id"]}
 
 
@@ -1499,7 +1502,33 @@ def ack_incident(site_id: str, p: Principal = Depends(principal)) -> dict:
         if not st or not st.get("incident_open"):
             raise HTTPException(status_code=404, detail="No hay incidente abierto en esa sede")
         st["acked"] = True
+    _audit(p, "incident_ack", site_id, "Confirmó el incidente («Enterado»)")
     return {"ok": True}
+
+
+def _audit(p: Principal, action: str, target: str, detail: str = "") -> None:
+    """Registra una acción sensible en la bitácora (best-effort, nunca rompe el
+    flujo). El actor es el nombre/rol de quien la ejecutó."""
+    try:
+        actor = getattr(p, "label", "") or p.role or "?"
+        store.record_audit(p.org_token, actor, action, target, detail, _now())
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@app.get("/v1/audit")
+def audit(limit: int = 100, p: Principal = Depends(principal)) -> dict:
+    """**Bitácora de auditoría** (quién hizo qué): las últimas acciones sensibles
+    de la organización (comandos remotos, confirmaciones, cambios de acceso). Para
+    forense y cumplimiento — algo que Fing no da."""
+    limit = max(1, min(int(limit), 500))
+    rows = store.list_audit(p.org_token, limit)
+    out = [{
+        "actor": r["actor"], "action": r["action"], "target": r["target"],
+        "detail": r["detail"],
+        "at": r["at"].isoformat() if hasattr(r["at"], "isoformat") else str(r["at"]),
+    } for r in rows]
+    return {"entries": out, "generated_at": _now().isoformat()}
 
 
 @app.get("/v1/inventory")
@@ -1560,6 +1589,8 @@ def set_access(body: AccessListIn, p: Principal = Depends(require_master)) -> di
         [{"token": u.token, "name": u.name, "role": u.role,
           "sites": list(u.sites or ["*"])} for u in body.users],
     )
+    _audit(p, "access_update", "rbac",
+           f"Actualizó accesos ({len(body.users)} persona(s))")
     return {"ok": True, "count": len(body.users)}
 
 
