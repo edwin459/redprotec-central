@@ -86,7 +86,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.6", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.7", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -455,6 +455,45 @@ def decide_escalation(
     return (now - last).total_seconds() >= interval
 
 
+def compute_uptime(events: list[dict], start: datetime, now: datetime) -> dict:
+    """PURA: a partir de los eventos down/up de UNA sede en [start, now], calcula
+    uptime %, downtime total, nº de incidentes y MTTR (media de duración de las
+    caídas RESUELTAS). Si el primer evento es 'up', se asume que la sede venía
+    caída desde antes de la ventana (cuenta como incidente en curso)."""
+    window = (now - start).total_seconds()
+    if window <= 0:
+        return {"uptime_pct": 100.0, "downtime_seconds": 0,
+                "incidents": 0, "mttr_seconds": 0}
+    evs = sorted(events, key=lambda e: e["at"])
+    downtime = 0.0
+    incidents = 0
+    resolved: list[float] = []
+    down_start: datetime | None = None
+    if evs and evs[0]["event"] == "up":
+        down_start = start
+        incidents += 1
+    for e in evs:
+        at = min(max(e["at"], start), now)
+        if e["event"] == "down":
+            if down_start is None:
+                down_start = at
+                incidents += 1
+        elif e["event"] == "up" and down_start is not None:
+            d = (at - down_start).total_seconds()
+            downtime += d
+            resolved.append(d)
+            down_start = None
+    if down_start is not None:  # sigue caída al final de la ventana
+        downtime += (now - down_start).total_seconds()
+    downtime = max(0.0, min(downtime, window))
+    return {
+        "uptime_pct": round(100.0 * (1 - downtime / window), 3),
+        "downtime_seconds": int(downtime),
+        "incidents": incidents,
+        "mttr_seconds": round(sum(resolved) / len(resolved)) if resolved else 0,
+    }
+
+
 def compose_site_escalation_message(
     site_name: str, down_seconds: float, level: int
 ) -> tuple[str, str]:
@@ -588,6 +627,7 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
 
     # Fase 4: confirmar el estado de las acciones cuyo push SÍ salió (o sin tema).
     # Las fallidas se dejan sin confirmar → el próximo tick las reintenta.
+    to_record: list[tuple[str, str, str]] = []
     with _WATCH_LOCK:
         for act in pending:
             if not act.get("confirm"):
@@ -600,6 +640,15 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
                 if cur and cur.get("acked"):
                     continue
             org_watch[act["site_id"]] = act["store_state"]
+            if act["event"] in ("down", "up"):
+                to_record.append((act["org"], act["site_id"], act["event"]))
+    # Historial SLA (best-effort, FUERA del lock): registra caídas/recuperaciones
+    # confirmadas. Nunca debe tumbar el watchdog si el store falla.
+    for org_, sid_, ev_ in to_record:
+        try:
+            store.record_site_event(org_, sid_, ev_, now)
+        except Exception:  # noqa: BLE001
+            pass
     return emitted
 
 
@@ -1370,6 +1419,37 @@ def availability(p: Principal = Depends(principal)) -> dict:
             "criticals_down": total_crit - up_crit,
             "availability_pct": round(100 * up_crit / total_crit) if total_crit else 100,
         },
+        "generated_at": now.isoformat(),
+    }
+
+
+@app.get("/v1/sla")
+def sla(days: int = 30, p: Principal = Depends(principal)) -> dict:
+    """**SLA histórico**: uptime %, incidentes y MTTR por sede en los últimos
+    `days` días, a partir del historial de caídas/recuperaciones persistido. Es la
+    prueba AUDITABLE de disponibilidad — algo que Fing no da."""
+    days = max(1, min(int(days), 365))
+    now = _now()
+    start = now - timedelta(days=days)
+    by_site: dict[str, list] = {}
+    for e in store.site_events(p.org_token, start):
+        by_site.setdefault(e["site_id"], []).append(e)
+    out: list[dict] = []
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        u = compute_uptime(by_site.get(site_id, []), start, now)
+        out.append({"site_id": site_id, "site_name": rec["site_name"], **u})
+    out.sort(key=lambda x: (x["uptime_pct"], x["site_name"].lower()))  # peor primero
+    if out:
+        overall = round(sum(x["uptime_pct"] for x in out) / len(out), 3)
+        total_incidents = sum(x["incidents"] for x in out)
+    else:
+        overall, total_incidents = 100.0, 0
+    return {
+        "sites": out, "days": days,
+        "overall": {"uptime_pct": overall, "incidents": total_incidents,
+                    "sites": len(out)},
         "generated_at": now.isoformat(),
     }
 

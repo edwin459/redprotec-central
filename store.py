@@ -56,6 +56,12 @@ class Store(Protocol):
     # Da de baja una sede (el dueño la quita del panel). Devuelve True si existía.
     def remove_site(self, org: str, site_id: str) -> bool: ...
 
+    # historial de disponibilidad (SLA): eventos de caída/recuperación por sede.
+    def record_site_event(self, org: str, site_id: str, event: str,
+                          at: datetime) -> None: ...
+    def site_events(self, org: str, since: datetime,
+                    site_id: str | None = None) -> list[dict]: ...
+
     # comandos (cola por sede)
     def enqueue_command(self, org: str, site_id: str, command: dict) -> None: ...
     def pending_commands(self, org: str, site_id: str,
@@ -107,6 +113,7 @@ class MemoryStore:
         self._agent_tokens: dict[str, dict] = {}  # token -> {org, label, created_at}
         self._entitlements: dict[str, dict] = {}  # org -> {plan, trial_ends_at}
         self._kv: dict[str, str] = {}             # clave/valor singleton (RAM)
+        self._events: list[dict] = []             # SLA: eventos down/up (RAM)
         self._lock = lock or threading.Lock()
 
     def stats(self) -> tuple[int, int]:
@@ -144,6 +151,23 @@ class MemoryStore:
             # Descarta también su cola de comandos (no debe sobrevivir a la sede).
             self._commands.get(org, {}).pop(site_id, None)
             return existed
+
+    def record_site_event(self, org, site_id, event, at) -> None:
+        with self._lock:
+            self._events.append(
+                {"org": org, "site_id": site_id, "event": event, "at": at})
+            # Poda: conserva los últimos 20000 (evita crecer sin límite en RAM).
+            if len(self._events) > 20000:
+                self._events = self._events[-20000:]
+
+    def site_events(self, org, since, site_id=None) -> list[dict]:
+        with self._lock:
+            return [
+                {"site_id": e["site_id"], "event": e["event"], "at": e["at"]}
+                for e in self._events
+                if e["org"] == org and e["at"] >= since
+                and (site_id is None or e["site_id"] == site_id)
+            ]
 
     def enqueue_command(self, org, site_id, command) -> None:
         with self._lock:
@@ -272,6 +296,17 @@ CREATE TABLE IF NOT EXISTS commands (
 );
 CREATE INDEX IF NOT EXISTS commands_site_idx
     ON commands (org_token, site_id, created_at);
+
+-- Historial de disponibilidad (SLA): eventos de caída/recuperación por sede.
+CREATE TABLE IF NOT EXISTS site_events (
+    id         bigserial   PRIMARY KEY,
+    org_token  text        NOT NULL,
+    site_id    text        NOT NULL,
+    event      text        NOT NULL,
+    at         timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS site_events_org_at_idx
+    ON site_events (org_token, at);
 
 CREATE TABLE IF NOT EXISTS org_config (
     org_token    text PRIMARY KEY,
@@ -459,6 +494,32 @@ class PostgresStore:
                 (org, site_id),
             )
             return cur.rowcount > 0
+
+    # ── historial de disponibilidad (SLA) ──
+    def record_site_event(self, org, site_id, event, at) -> None:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO site_events (org_token, site_id, event, at) "
+                "VALUES (%s, %s, %s, %s)",
+                (org, site_id, event, at),
+            )
+
+    def site_events(self, org, since, site_id=None) -> list[dict]:
+        with self._connection() as conn, conn.cursor() as cur:
+            if site_id is None:
+                cur.execute(
+                    "SELECT site_id, event, at FROM site_events "
+                    "WHERE org_token = %s AND at >= %s ORDER BY at",
+                    (org, since),
+                )
+            else:
+                cur.execute(
+                    "SELECT site_id, event, at FROM site_events "
+                    "WHERE org_token = %s AND site_id = %s AND at >= %s ORDER BY at",
+                    (org, site_id, since),
+                )
+            return [{"site_id": r[0], "event": r[1], "at": r[2]}
+                    for r in cur.fetchall()]
 
     # ── comandos ──
     def enqueue_command(self, org, site_id, command) -> None:

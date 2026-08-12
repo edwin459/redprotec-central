@@ -250,6 +250,80 @@ class DecideEscalationTest(unittest.TestCase):
             main.decide_escalation(self._inc(incident_open=False), main._now(), 300, 3))
 
 
+class ComputeUptimeTest(unittest.TestCase):
+    def setUp(self):
+        self.now = main._now()
+        self.start = self.now - timedelta(days=30)
+
+    def test_no_events_is_full_uptime(self):
+        u = main.compute_uptime([], self.start, self.now)
+        self.assertEqual(u["uptime_pct"], 100.0)
+        self.assertEqual(u["incidents"], 0)
+
+    def test_one_resolved_incident(self):
+        down = self.now - timedelta(hours=2)
+        up = self.now - timedelta(hours=1)  # 1h de caída
+        u = main.compute_uptime(
+            [{"event": "down", "at": down}, {"event": "up", "at": up}],
+            self.start, self.now)
+        self.assertEqual(u["incidents"], 1)
+        self.assertEqual(u["downtime_seconds"], 3600)
+        self.assertEqual(u["mttr_seconds"], 3600)
+        self.assertLess(u["uptime_pct"], 100.0)
+        self.assertGreater(u["uptime_pct"], 99.0)
+
+    def test_still_down_counts_to_now(self):
+        down = self.now - timedelta(hours=1)
+        u = main.compute_uptime([{"event": "down", "at": down}],
+                                self.start, self.now)
+        self.assertEqual(u["incidents"], 1)
+        self.assertEqual(u["mttr_seconds"], 0)  # sin resolver, no cuenta en MTTR
+        self.assertAlmostEqual(u["downtime_seconds"], 3600, delta=2)
+
+    def test_down_before_window_first_event_up(self):
+        # Primer evento es 'up' → venía caída desde antes; cuenta desde start.
+        up = self.start + timedelta(hours=1)
+        u = main.compute_uptime([{"event": "up", "at": up}],
+                                self.start, self.now)
+        self.assertEqual(u["incidents"], 1)
+        self.assertAlmostEqual(u["downtime_seconds"], 3600, delta=2)
+
+
+class SlaEndpointTest(unittest.TestCase):
+    def setUp(self):
+        main._STORE.clear()
+        if hasattr(main.store, "_events"):
+            main.store._events.clear()
+        self.org = "org-sla-1"
+        # store real en memoria para eventos (main.store envuelve los dicts).
+        self.now = main._now()
+
+    def tearDown(self):
+        main._STORE.clear()
+        if hasattr(main.store, "_events"):
+            main.store._events.clear()
+
+    def _seed(self, site_id):
+        main._STORE.setdefault(self.org, {})[site_id] = {
+            "site_name": site_id.title(),
+            "summary": main.SiteSummary().model_dump(),
+            "devices": [], "remote_admin": False, "updated_at": self.now,
+        }
+
+    def test_sla_reflects_recorded_events(self):
+        self._seed("bogota")
+        main.store.record_site_event(
+            self.org, "bogota", "down", self.now - timedelta(hours=3))
+        main.store.record_site_event(
+            self.org, "bogota", "up", self.now - timedelta(hours=1))  # 2h caída
+        out = main.sla(days=30, p=main._resolve_principal(self.org))
+        site = out["sites"][0]
+        self.assertEqual(site["site_id"], "bogota")
+        self.assertEqual(site["incidents"], 1)
+        self.assertEqual(site["downtime_seconds"], 7200)
+        self.assertIn("uptime_pct", out["overall"])
+
+
 class AlertRoutingTest(unittest.TestCase):
     """El watchdog en la nube prefiere Telegram (Railway alcanza api.telegram.org;
     ntfy.sh está bloqueado). ntfy queda como respaldo."""
