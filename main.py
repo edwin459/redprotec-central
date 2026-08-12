@@ -44,9 +44,23 @@ logger = logging.getLogger("redprotec.central")
 OFFLINE_ALERT_SECONDS = int(os.environ.get("OFFLINE_ALERT_SECONDS", "210"))
 WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("WATCHDOG_INTERVAL_SECONDS", "60"))
 
+# Observabilidad del watchdog (sin secretos): permite verificar en /stats que el
+# bucle realmente corre en producción y por qué (o si) no está emitiendo. Un
+# watchdog que "no avisa" es indistinguible de uno que "nunca corrió" sin esto.
+_WDIAG: dict = {
+    "started": False,       # el bucle arrancó (lifespan corrió)
+    "ticks": 0,             # cuántos ciclos completó
+    "last_tick_at": None,   # datetime del último tick OK
+    "last_error": None,     # "Tipo: mensaje" del último fallo del tick
+    "last_sites_seen": 0,   # sedes evaluadas en el último tick
+    "last_max_age": None,   # mayor seconds_since_update visto (vs umbral)
+    "last_emitted": 0,      # transiciones emitidas en el último tick
+}
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _WDIAG["started"] = True
     task = asyncio.create_task(_watchdog_loop())
     try:
         yield
@@ -58,7 +72,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.8.1", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.8.2", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -329,6 +343,7 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
 
     to_push: list[tuple[str, str, str, str, str]] = []  # topic,title,body,prio,tags
     emitted: list[tuple[str, str, str]] = []
+    max_age: float | None = None
 
     # Fase 2: decidir transiciones y actualizar el estado del watchdog.
     with _WATCH_LOCK:
@@ -339,6 +354,7 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
             if updated.tzinfo is None:
                 updated = updated.replace(tzinfo=timezone.utc)
             delta = (now - updated).total_seconds()
+            max_age = delta if max_age is None else max(max_age, delta)
 
             org_watch = _SITE_WATCH.setdefault(org, {})
             prev = org_watch.get(site_id)
@@ -372,6 +388,11 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
                     "since": (prev or {}).get("since", now),
                 }
 
+    # Observabilidad: registrar lo que vio este tick (antes de la I/O de red).
+    _WDIAG["last_sites_seen"] = len(sites)
+    _WDIAG["last_max_age"] = round(max_age) if max_age is not None else None
+    _WDIAG["last_emitted"] = len(emitted)
+
     # Fase 3: resolver el tema de cada org (store) y enviar los pushes.
     for org, title, body, prio, tags in to_push:
         topic = store.get_org_config(org).get("alert_topic")
@@ -386,9 +407,13 @@ async def _watchdog_loop() -> None:
     while True:
         try:
             await asyncio.to_thread(_watchdog_tick, _now())
+            _WDIAG["ticks"] += 1
+            _WDIAG["last_tick_at"] = _now().isoformat()
+            _WDIAG["last_error"] = None
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _WDIAG["last_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
             logger.exception("Fallo en el watchdog de sedes")
         await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
 
@@ -562,11 +587,23 @@ def download_info() -> dict:
 def stats() -> dict:
     """Contadores (best-effort). Si la base aún no responde, devuelve nulls sin
     romper — no es un endpoint de liveness."""
+    wd = {
+        "started": _WDIAG["started"],
+        "ticks": _WDIAG["ticks"],
+        "last_tick_at": _WDIAG["last_tick_at"],
+        "last_error": _WDIAG["last_error"],
+        "last_sites_seen": _WDIAG["last_sites_seen"],
+        "last_max_age": _WDIAG["last_max_age"],
+        "last_emitted": _WDIAG["last_emitted"],
+        "interval_s": WATCHDOG_INTERVAL_SECONDS,
+        "threshold_s": OFFLINE_ALERT_SECONDS,
+    }
     try:
         orgs, sites = store.stats()
-        return {"status": "ok", "orgs": orgs, "sites": sites}
+        return {"status": "ok", "orgs": orgs, "sites": sites, "watchdog": wd}
     except Exception:  # noqa: BLE001
-        return {"status": "db_unavailable", "orgs": None, "sites": None}
+        return {"status": "db_unavailable", "orgs": None, "sites": None,
+                "watchdog": wd}
 
 
 @app.post("/v1/heartbeat")
