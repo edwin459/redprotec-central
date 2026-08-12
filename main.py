@@ -55,6 +55,9 @@ _WDIAG: dict = {
     "last_sites_seen": 0,   # sedes evaluadas en el último tick
     "last_max_age": None,   # mayor seconds_since_update visto (vs umbral)
     "last_emitted": 0,      # transiciones emitidas en el último tick
+    # Decisión por sede RECIENTE (age<1h) del último tick: edad/estado previo/
+    # evento. Sin nombres de sede ni org → no filtra datos. Solo para diagnóstico.
+    "last_recent": [],
 }
 
 
@@ -72,7 +75,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.8.2", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.8.3", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -344,6 +347,7 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
     to_push: list[tuple[str, str, str, str, str]] = []  # topic,title,body,prio,tags
     emitted: list[tuple[str, str, str]] = []
     max_age: float | None = None
+    recent: list[dict] = []
 
     # Fase 2: decidir transiciones y actualizar el estado del watchdog.
     with _WATCH_LOCK:
@@ -362,6 +366,9 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
             new_state, event = decide_site_transition(
                 prev_state, delta, OFFLINE_ALERT_SECONDS
             )
+            if delta < 3600:  # solo sedes recientes (dx, sin nombres)
+                recent.append({"age": int(delta), "prev": prev_state,
+                               "new": new_state, "event": event})
 
             if event == "down":
                 org_watch[site_id] = {"state": "offline", "since": now}
@@ -392,6 +399,7 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
     _WDIAG["last_sites_seen"] = len(sites)
     _WDIAG["last_max_age"] = round(max_age) if max_age is not None else None
     _WDIAG["last_emitted"] = len(emitted)
+    _WDIAG["last_recent"] = recent
 
     # Fase 3: resolver el tema de cada org (store) y enviar los pushes.
     for org, title, body, prio, tags in to_push:
@@ -595,6 +603,7 @@ def stats() -> dict:
         "last_sites_seen": _WDIAG["last_sites_seen"],
         "last_max_age": _WDIAG["last_max_age"],
         "last_emitted": _WDIAG["last_emitted"],
+        "last_recent": _WDIAG["last_recent"],
         "interval_s": WATCHDOG_INTERVAL_SECONDS,
         "threshold_s": OFFLINE_ALERT_SECONDS,
     }
