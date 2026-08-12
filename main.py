@@ -24,6 +24,7 @@ import os
 import secrets
 import socket
 import threading
+import time
 import urllib.request
 import uuid
 from contextlib import asynccontextmanager
@@ -78,7 +79,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.8.5", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.8.6", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -264,29 +265,40 @@ class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
 _IPV4_OPENER = urllib.request.build_opener(_IPv4HTTPSHandler())
 
 
+_PUSH_TIMEOUT = float(os.environ.get("PUSH_TIMEOUT_SECONDS", "15"))
+_PUSH_ATTEMPTS = int(os.environ.get("PUSH_ATTEMPTS", "3"))
+
+
 def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, tags: str) -> str:
-    """Envía un push a ntfy (best-effort). El relay es el ÚNICO que ve todas las
-    sedes 24/7, así que es el lugar correcto para alertar al dueño de la org.
-    Devuelve 'ok' | 'no_topic' | 'ERR:<detalle>' para observabilidad (nunca lanza)."""
+    """Envía un push a ntfy. El relay es el ÚNICO que ve todas las sedes 24/7, así
+    que es el lugar correcto para alertar al dueño de la org. Devuelve
+    'ok:<status>' | 'no_topic' | 'ERR:<detalle>' (nunca lanza).
+
+    Egress a ntfy.sh desde PaaS (Railway) es intermitente/lento: se fuerza IPv4
+    (no hay ruta IPv6) y se reintenta con backoff. Si aun así falla, el watchdog
+    NO marca la sede como avisada y reintenta en el próximo tick (entrega fiable)."""
     if not topic or not topic.strip():
         return "no_topic"
     t = topic.strip()
     url = t if t.startswith("http") else f"https://ntfy.sh/{t}"
     safe_title = title.encode("ascii", "ignore").decode().strip() or "RedProtec"
-    try:
-        req = urllib.request.Request(
-            url,
-            data=message.encode("utf-8"),
-            method="POST",
-            headers={"Title": safe_title, "Priority": priority, "Tags": tags},
-        )
-        # Forzar IPv4 (ver _IPv4HTTPSConnection). Si la URL fuese http:// (tema
-        # personalizado sin TLS) cae al opener normal.
-        opener = _IPV4_OPENER if url.startswith("https://") else urllib.request
-        resp = opener.open(req, timeout=8)  # noqa: S310
-        return f"ok:{getattr(resp, 'status', '?')}"
-    except Exception as exc:  # noqa: BLE001
-        return f"ERR:{type(exc).__name__}:{str(exc)[:120]}"
+    opener = _IPV4_OPENER if url.startswith("https://") else urllib.request
+    last = "ERR:sin_intento"
+    for attempt in range(max(1, _PUSH_ATTEMPTS)):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=message.encode("utf-8"),
+                method="POST",
+                headers={"Title": safe_title, "Priority": priority, "Tags": tags},
+            )
+            resp = opener.open(req, timeout=_PUSH_TIMEOUT)  # noqa: S310
+            return f"ok:{getattr(resp, 'status', '?')}"
+        except Exception as exc:  # noqa: BLE001
+            last = f"ERR:{type(exc).__name__}:{str(exc)[:100]}"
+            if attempt < _PUSH_ATTEMPTS - 1:
+                time.sleep(1.0 * (attempt + 1))  # backoff 1s, 2s
+    return last
 
 
 def _fmt_device(d: dict) -> str:
@@ -380,12 +392,17 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
         (org, site_id, rec) for org, site_id, rec in store.iter_sites_all()
     ]
 
-    to_push: list[tuple[str, str, str, str, str]] = []  # topic,title,body,prio,tags
+    # Acciones pendientes de notificar: (org, site_id, event, new_state, since,
+    # title, body, prio, tags). El estado NO se confirma hasta que el push SALE;
+    # si falla, se reintenta en el próximo tick → una caída nunca se pierde por un
+    # hipo de red (egress intermitente a ntfy.sh).
+    pending: list[dict] = []
     emitted: list[tuple[str, str, str]] = []
     max_age: float | None = None
     recent: list[dict] = []
 
-    # Fase 2: decidir transiciones y actualizar el estado del watchdog.
+    # Fase 2: decidir transiciones. Los cambios (down/up) quedan PENDIENTES; solo
+    # se persiste de una vez lo que no notifica (siembra / sin cambio).
     with _WATCH_LOCK:
         for org, site_id, rec in sites:
             updated = rec.get("updated_at")
@@ -407,9 +424,11 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
                                "new": new_state, "event": event})
 
             if event == "down":
-                org_watch[site_id] = {"state": "offline", "since": now}
                 title, body = compose_site_down_message(rec.get("site_name") or site_id)
-                to_push.append((org, title, body, "high", "rotating_light"))
+                pending.append({"org": org, "site_id": site_id, "event": event,
+                                "new_state": "offline", "since": now,
+                                "title": title, "body": body,
+                                "prio": "high", "tags": "rotating_light"})
                 emitted.append((org, site_id, event))
             elif event == "up":
                 down_since = (prev or {}).get("since")
@@ -418,14 +437,16 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
                     if isinstance(down_since, datetime)
                     else 0.0
                 )
-                org_watch[site_id] = {"state": "online", "since": now}
                 title, body = compose_site_up_message(
                     rec.get("site_name") or site_id, down_secs
                 )
-                to_push.append((org, title, body, "default", "white_check_mark"))
+                pending.append({"org": org, "site_id": site_id, "event": event,
+                                "new_state": "online", "since": now,
+                                "title": title, "body": body,
+                                "prio": "default", "tags": "white_check_mark"})
                 emitted.append((org, site_id, event))
             else:
-                # Sembrado inicial o sin cambio: solo persistir el estado.
+                # Sembrado inicial o sin cambio: persistir de una vez (no notifica).
                 org_watch[site_id] = {
                     "state": new_state,
                     "since": (prev or {}).get("since", now),
@@ -437,16 +458,31 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
     _WDIAG["last_emitted"] = len(emitted)
     _WDIAG["last_recent"] = recent
 
-    # Fase 3: resolver el tema de cada org (store) y enviar los pushes.
+    # Fase 3: enviar los pushes (FUERA del candado) y confirmar SOLO los que salen.
     push_diag: list[str] = []
-    for org, title, body, prio, tags in to_push:
-        topic = store.get_org_config(org).get("alert_topic")
-        if topic:
-            push_diag.append(_push_ntfy(topic, title, body, priority=prio, tags=tags))
-        else:
+    for act in pending:
+        topic = store.get_org_config(act["org"]).get("alert_topic")
+        if not topic:
+            # Sin destino: no se puede avisar → confirmar igual (no reintentar en
+            # bucle una sede cuya org no tiene tema configurado).
+            act["confirm"] = True
             push_diag.append("no_topic_for_org")
+            continue
+        result = _push_ntfy(topic, act["title"], act["body"],
+                            priority=act["prio"], tags=act["tags"])
+        act["confirm"] = str(result).startswith("ok")
+        push_diag.append(result)
     if push_diag:
         _WDIAG["last_push"] = push_diag
+
+    # Fase 4: confirmar el estado de las acciones cuyo push SÍ salió (o sin tema).
+    # Las fallidas se dejan sin confirmar → el próximo tick las reintenta.
+    with _WATCH_LOCK:
+        for act in pending:
+            if act.get("confirm"):
+                _SITE_WATCH.setdefault(act["org"], {})[act["site_id"]] = {
+                    "state": act["new_state"], "since": act["since"],
+                }
     return emitted
 
 

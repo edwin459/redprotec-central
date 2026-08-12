@@ -52,9 +52,12 @@ class WatchdogTickTest(unittest.TestCase):
         self.org = "org-token-watchdog-1"
         self.pushes: list[tuple] = []
         self._orig_push = main._push_ntfy
-        main._push_ntfy = lambda topic, title, message, *, priority, tags: (
+
+        def _fake_push(topic, title, message, *, priority, tags):
             self.pushes.append((topic, title, message, priority, tags))
-        )
+            return "ok:200"  # push exitoso → el watchdog confirma el estado
+
+        main._push_ntfy = _fake_push
         main._ORG_CONFIG[self.org] = {"alert_topic": "mytopic"}
 
     def tearDown(self):
@@ -120,6 +123,39 @@ class WatchdogTickTest(unittest.TestCase):
         emitted = main._watchdog_tick(later)
         self.assertEqual([e[2] for e in emitted], ["down"])  # se detecta
         self.assertEqual(self.pushes, [])                     # pero no hay a quién avisar
+        # Aunque no hubo push, el estado se confirma (org sin tema) → no reintenta.
+        again = main._watchdog_tick(later + timedelta(seconds=60))
+        self.assertEqual(again, [])
+
+    def test_failed_push_retries_until_delivered(self):
+        # Entrega FIABLE: si el push falla, el estado NO se confirma y el watchdog
+        # REINTENTA en el próximo tick, hasta que sale. Así una caída no se pierde
+        # por un hipo de red (egress intermitente a ntfy.sh).
+        now = main._now()
+        self._seed_site("bogota", now)
+        main._watchdog_tick(now)  # baseline online
+
+        # 1er intento: el push FALLA (simula timeout de egress).
+        main._push_ntfy = lambda *a, **k: "ERR:URLError:timed out"
+        down_at = now + timedelta(seconds=main.OFFLINE_ALERT_SECONDS + 30)
+        e1 = main._watchdog_tick(down_at)
+        self.assertEqual([e[2] for e in e1], ["down"])  # se decidió...
+
+        # 2º tick, el push SIGUE fallando → REINTENTA (vuelve a emitir 'down').
+        e2 = main._watchdog_tick(down_at + timedelta(seconds=60))
+        self.assertEqual([e[2] for e in e2], ["down"])  # reintento, no se perdió
+
+        # Ahora el push SALE → se confirma el estado.
+        delivered = []
+        main._push_ntfy = lambda topic, title, message, *, priority, tags: (
+            delivered.append(title) or "ok:200")
+        e3 = main._watchdog_tick(down_at + timedelta(seconds=120))
+        self.assertEqual([e[2] for e in e3], ["down"])  # este sí entregó
+        self.assertEqual(len(delivered), 1)
+
+        # Confirmado: el siguiente tick ya NO re-avisa.
+        e4 = main._watchdog_tick(down_at + timedelta(seconds=180))
+        self.assertEqual(e4, [])
 
 
 if __name__ == "__main__":
