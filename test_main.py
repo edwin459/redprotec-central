@@ -466,5 +466,52 @@ class FleetThreatsTests(unittest.TestCase):
         self.assertEqual(roaming, [])
 
 
+class ComplianceAndAvailabilityTests(unittest.TestCase):
+    """Postura de Cumplimiento (/v1/compliance) y Disponibilidad (/v1/availability)."""
+
+    def setUp(self):
+        main._STORE.clear()
+        main._ACCESS.clear()
+        self.org = "org-compliance-token-xyz"
+
+    def _seed(self, site_id, name, summary, *, devices=None, remote_admin=False):
+        main._STORE.setdefault(self.org, {})[site_id] = {
+            "site_name": name,
+            "summary": {**main.SiteSummary().model_dump(), **summary},
+            "devices": devices or [],
+            "remote_admin": remote_admin,
+            "updated_at": main._now(),
+        }
+
+    def test_compliance_grades_and_findings(self):
+        # Sede sana (guardián, con inventario) vs sede con problemas.
+        self._seed("ok", "Sana", {"protection_mode": "guardian",
+                   "devices_total": 5, "criticals_total": 1},
+                   devices=[{"mac": "AA", "trust": "trusted"}])
+        self._seed("bad", "Riesgo", {"protection_mode": "unknown",
+                   "alerts": 4, "criticals_total": 2, "criticals_down": 1})
+        out = main.compliance(p=main._resolve_principal(self.org))
+        by = {s["site_id"]: s for s in out["sites"]}
+        self.assertGreaterEqual(by["ok"]["score"], 90)
+        self.assertEqual(by["ok"]["grade"], "A")
+        self.assertLess(by["bad"]["score"], by["ok"]["score"])
+        # La peor va primero y trae hallazgos accionables.
+        self.assertEqual(out["sites"][0]["site_id"], "bad")
+        sevs = {f["severity"] for f in by["bad"]["findings"]}
+        self.assertIn("critical", sevs)  # crítico caído
+        self.assertIn("grade", out["overall"])
+
+    def test_availability_live_snapshot(self):
+        self._seed("a", "A", {"criticals_total": 2, "criticals_down": 0,
+                   "devices_online": 3, "devices_total": 3})
+        self._seed("b", "B", {"criticals_total": 2, "criticals_down": 2})
+        out = main.availability(p=main._resolve_principal(self.org))
+        self.assertEqual(out["summary"]["criticals_total"], 4)
+        self.assertEqual(out["summary"]["criticals_up"], 2)
+        self.assertEqual(out["summary"]["availability_pct"], 50)
+        # La sede con críticos caídos va primero.
+        self.assertEqual(out["sites"][0]["site_id"], "b")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -80,7 +80,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.4", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.5", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -1188,6 +1188,118 @@ def fleet_threats(p: Principal = Depends(principal)) -> dict:
     for t in threats:
         summary[t["severity"]] = summary.get(t["severity"], 0) + 1
     return {"threats": threats, "summary": summary, "generated_at": now.isoformat()}
+
+
+_GRADE_BANDS = [(90, "A"), (75, "B"), (60, "C"), (40, "D"), (0, "F")]
+
+
+def _grade(score: int) -> str:
+    for th, g in _GRADE_BANDS:
+        if score >= th:
+            return g
+    return "F"
+
+
+@app.get("/v1/compliance")
+def compliance(p: Principal = Depends(principal)) -> dict:
+    """**Postura de Cumplimiento** (diferenciador empresa): calcula una nota de
+    seguridad A–F por sede a partir de lo que ya reporta (intrusos sin gestionar,
+    activos críticos caídos, protección activa, visibilidad, conectividad) y una
+    nota de flota. Reutiliza `_site_out`; no persiste nada. Ideal para auditoría."""
+    now = _now()
+    sites: list[dict] = []
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        so = _site_out(site_id, rec, now)
+        s = so["summary"]
+        score = 100
+        findings: list[dict] = []
+        if not so["online"]:
+            score -= 25
+            findings.append({"severity": "high",
+                             "text": "La sede no está reportando (agente caído o sin internet)."})
+        alerts = int(s.get("alerts", 0))
+        if alerts > 0:
+            score -= min(30, alerts * 6)
+            findings.append({"severity": "high" if alerts >= 3 else "medium",
+                             "text": f"{alerts} equipo(s) desconocido(s) sin gestionar."})
+        cd = int(s.get("criticals_down", 0))
+        if cd > 0:
+            score -= min(30, cd * 15)
+            findings.append({"severity": "critical",
+                             "text": f"{cd} activo(s) crítico(s) fuera de línea."})
+        if s.get("protection_mode") != "guardian":
+            score -= 15
+            findings.append({"severity": "medium",
+                             "text": "Protección activa (Guardián) no confirmada."})
+        if not so["has_inventory"]:
+            score -= 12
+            findings.append({"severity": "low",
+                             "text": "Sin inventario completo: visibilidad limitada."})
+        if so["remote_admin"]:
+            score = min(100, score + 5)  # puede responder remotamente
+        score = max(0, min(100, score))
+        if not findings:
+            findings.append({"severity": "ok", "text": "Sin hallazgos: sede en buen estado."})
+        sites.append({
+            "site_id": site_id, "site_name": rec["site_name"],
+            "online": so["online"], "score": score, "grade": _grade(score),
+            "findings": findings,
+            "devices_total": int(s.get("devices_total", 0)),
+            "criticals_total": int(s.get("criticals_total", 0)),
+        })
+    sites.sort(key=lambda x: (x["score"], x["site_name"].lower()))  # peor primero
+    overall = round(sum(x["score"] for x in sites) / len(sites)) if sites else 0
+    return {
+        "sites": sites,
+        "overall": {"score": overall, "grade": _grade(overall) if sites else "—",
+                    "sites": len(sites)},
+        "generated_at": now.isoformat(),
+    }
+
+
+@app.get("/v1/availability")
+def availability(p: Principal = Depends(principal)) -> dict:
+    """**Tablero de Disponibilidad** (diferenciador NOC): estado EN VIVO de las
+    sedes y de sus activos críticos (arriba/abajo, hace cuánto reportó). Reúne el
+    watchdog + activos críticos que ya existen. Base para SLA/MTTR."""
+    now = _now()
+    sites: list[dict] = []
+    total_crit = up_crit = online_sites = 0
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        so = _site_out(site_id, rec, now)
+        s = so["summary"]
+        ct = int(s.get("criticals_total", 0))
+        cd = int(s.get("criticals_down", 0))
+        cu = max(0, ct - cd)
+        total_crit += ct
+        up_crit += cu
+        if so["online"]:
+            online_sites += 1
+        sites.append({
+            "site_id": site_id, "site_name": rec["site_name"],
+            "online": so["online"],
+            "seconds_since_update": so["seconds_since_update"],
+            "criticals_total": ct, "criticals_down": cd, "criticals_up": cu,
+            "devices_online": int(s.get("devices_online", 0)),
+            "devices_total": int(s.get("devices_total", 0)),
+        })
+    sites.sort(key=lambda x: (0 if not x["online"] else 1,
+                              -x["criticals_down"], x["site_name"].lower()))
+    n = len(sites)
+    return {
+        "sites": sites,
+        "summary": {
+            "sites": n, "sites_online": online_sites,
+            "criticals_total": total_crit, "criticals_up": up_crit,
+            "criticals_down": total_crit - up_crit,
+            "availability_pct": round(100 * up_crit / total_crit) if total_crit else 100,
+        },
+        "generated_at": now.isoformat(),
+    }
 
 
 @app.get("/v1/inventory")
