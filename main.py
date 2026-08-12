@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.8", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.9", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -1638,6 +1638,27 @@ def require_admin(authorization: str | None = Header(default=None)) -> bool:
     return True
 
 
+# ─────────────────── MSP: Consola de socio (multi-cliente) ───────────────────
+class PartnerIn(BaseModel):
+    """Alta/edición de un SOCIO (MSP) y sus organizaciones-cliente. La define el
+    super-admin (dueño del negocio) al onboardear a un proveedor de TI."""
+    token: str = Field(min_length=8, max_length=200)
+    name: str = Field(default="", max_length=120)
+    clients: list[str] = Field(default_factory=list)  # org_tokens de clientes
+
+
+def require_partner(authorization: str | None = Header(default=None)) -> dict:
+    """Autentica a un SOCIO por su token (guardado en KV). Devuelve su config
+    ``{token, name, clients}``. El socio ve SOLO sus organizaciones-cliente."""
+    token = require_org_token(authorization)
+    raw = store.kv_get(f"partner::{token}")
+    if not raw:
+        raise HTTPException(status_code=403, detail="Token de socio no válido")
+    data = json.loads(raw)
+    data["token"] = token
+    return data
+
+
 def _plan_readonly(org: str, now: datetime) -> str:
     """Plan efectivo SIN mutar el almacén (para vistas de solo lectura del panel).
     A diferencia de `_compute_entitlement`, NO crea la prueba a una cuenta nueva."""
@@ -1657,16 +1678,14 @@ def _plan_readonly(org: str, now: datetime) -> str:
     return "free"
 
 
-@app.get("/v1/admin/fleet")
-def admin_fleet(_: bool = Depends(require_admin)) -> dict:
-    """**Panel de FLOTA del dueño** (solo super-admin). Vista de TODAS las cuentas
-    con AGREGADOS por cuenta: sedes, equipos, alertas, plan, y si el agente está
-    en línea — para dar soporte y ver problemas de raíz. NO expone el inventario
-    (equipos/MACs) de la red de ningún cliente: soporte sin vigilar. La salud por
-    cuenta permite priorizar (sin conexión / críticos caídos / alertas)."""
-    now = _now()
+def _aggregate_fleet(now: datetime, only_orgs: set[str] | None = None) -> dict:
+    """Agrega TODAS las sedes por cuenta (org) → salud por cuenta. Si `only_orgs`
+    se pasa, limita a esas organizaciones (base tanto del panel del DUEÑO como de
+    la Consola de SOCIO/MSP, que ven el mismo agregado sobre distinto alcance)."""
     orgs: dict[str, dict] = {}
     for org, _site_id, rec in store.iter_sites_all():
+        if only_orgs is not None and org not in only_orgs:
+            continue
         summ = rec.get("summary") or {}
         updated = rec.get("updated_at")
         online = updated is not None and (
@@ -1682,6 +1701,13 @@ def admin_fleet(_: bool = Depends(require_admin)) -> dict:
         o["criticals_down"] += int(summ.get("criticals_down", 0) or 0)
         if updated is not None and (o["last_seen"] is None or updated > o["last_seen"]):
             o["last_seen"] = updated
+    # Cuentas asignadas SIN sedes reportando aún (aparecen offline, no invisibles).
+    if only_orgs is not None:
+        for org in only_orgs:
+            orgs.setdefault(org, {
+                "org": org, "sites": 0, "sites_online": 0, "devices": 0,
+                "alerts": 0, "criticals_down": 0, "last_seen": None,
+            })
 
     fleet: list[dict] = []
     dist = {"free": 0, "trial": 0, "pro": 0}
@@ -1698,7 +1724,6 @@ def admin_fleet(_: bool = Depends(require_admin)) -> dict:
             "last_seen": last.isoformat() if last else None,
             "seconds_since_seen": int((now - last).total_seconds()) if last else None,
         })
-    # Peor salud primero: sin conexión → críticos caídos → alertas → más equipos.
     fleet.sort(key=lambda f: (
         0 if not f["online"] else 1,
         0 if f["criticals_down"] else 1,
@@ -1715,6 +1740,34 @@ def admin_fleet(_: bool = Depends(require_admin)) -> dict:
         "plans": dist,
     }
     return {"fleet": fleet, "totals": totals, "generated_at": now.isoformat()}
+
+
+@app.get("/v1/admin/fleet")
+def admin_fleet(_: bool = Depends(require_admin)) -> dict:
+    """**Panel de FLOTA del dueño** (solo super-admin). Vista de TODAS las cuentas
+    con AGREGADOS por cuenta: sedes, equipos, alertas, plan, y si el agente está
+    en línea — para dar soporte y ver problemas de raíz. NO expone el inventario
+    (equipos/MACs) de la red de ningún cliente: soporte sin vigilar."""
+    return _aggregate_fleet(_now())
+
+
+@app.post("/v1/admin/partners")
+def admin_set_partner(body: PartnerIn, _: bool = Depends(require_admin)) -> dict:
+    """**MSP:** el super-admin da de alta/edita un SOCIO y le asigna las
+    organizaciones-cliente que gestiona. Idempotente (reemplaza la lista)."""
+    clients = list(dict.fromkeys([c.strip() for c in body.clients if c.strip()]))
+    store.kv_set(f"partner::{body.token}",
+                 json.dumps({"name": body.name, "clients": clients}))
+    return {"ok": True, "clients": len(clients)}
+
+
+@app.get("/v1/partner/clients")
+def partner_clients(partner: dict = Depends(require_partner)) -> dict:
+    """**Consola de socio (MSP):** salud agregada de las organizaciones-cliente
+    del socio, en un solo panel. Reutiliza la agregación de flota, acotada al
+    alcance del socio. NO expone inventario/MACs de ningún cliente."""
+    agg = _aggregate_fleet(_now(), only_orgs=set(partner.get("clients") or []))
+    return {**agg, "partner_name": partner.get("name") or "Socio"}
 
 
 @app.put("/v1/admin/entitlement")

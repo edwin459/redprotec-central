@@ -513,5 +513,58 @@ class ComplianceAndAvailabilityTests(unittest.TestCase):
         self.assertEqual(out["sites"][0]["site_id"], "b")
 
 
+class PartnerConsoleTests(unittest.TestCase):
+    """Modo MSP (Consola de socio): un socio ve SOLO sus organizaciones-cliente."""
+
+    def setUp(self):
+        main._STORE.clear()
+        if hasattr(main.store, "_kv"):
+            main.store._kv.clear()
+        self.admin = "admin-secret-partner-test"
+        main.ADMIN_TOKEN = self.admin
+
+    def tearDown(self):
+        main.ADMIN_TOKEN = ""
+        main._STORE.clear()
+        if hasattr(main.store, "_kv"):
+            main.store._kv.clear()
+
+    def _seed(self, org, site_id):
+        main._STORE.setdefault(org, {})[site_id] = {
+            "site_name": site_id,
+            "summary": main.SiteSummary(devices_total=3).model_dump(),
+            "devices": [], "remote_admin": False, "updated_at": main._now()}
+
+    def test_partner_sees_only_assigned_clients(self):
+        self._seed("client-A", "s1")
+        self._seed("client-B", "s2")
+        self._seed("other-C", "s3")
+        main.admin_set_partner(
+            main.PartnerIn(token="partner-tok-123456", name="MSP Uno",
+                           clients=["client-A", "client-B"]),
+            _=main.require_admin(f"Bearer {self.admin}"))
+        out = main.partner_clients(
+            partner=main.require_partner("Bearer partner-tok-123456"))
+        orgs = {f["org"] for f in out["fleet"]}
+        self.assertEqual(orgs, {"client-A", "client-B"})  # NO ve other-C
+        self.assertEqual(out["partner_name"], "MSP Uno")
+        self.assertEqual(out["totals"]["accounts"], 2)
+
+    def test_unknown_partner_token_403(self):
+        with self.assertRaises(HTTPException) as ctx:
+            main.require_partner("Bearer nope-not-a-partner-xxxx")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_assigned_client_without_sites_is_listed_offline(self):
+        main.admin_set_partner(
+            main.PartnerIn(token="partner-tok-abcdef", name="MSP",
+                           clients=["client-empty"]),
+            _=main.require_admin(f"Bearer {self.admin}"))
+        out = main.partner_clients(
+            partner=main.require_partner("Bearer partner-tok-abcdef"))
+        self.assertEqual({f["org"] for f in out["fleet"]}, {"client-empty"})
+        self.assertFalse(out["fleet"][0]["online"])  # sin sedes → offline, no invisible
+
+
 if __name__ == "__main__":
     unittest.main()
