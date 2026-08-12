@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import json
 import logging
 import os
 import secrets
@@ -79,7 +80,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.2", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.3", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -1028,10 +1029,9 @@ def test_alert(p: Principal = Depends(require_master)) -> dict:
         )
         return {"channel": channel, "result": result,
                 "ok": str(result).startswith("ok")}
-    except Exception as exc:  # noqa: BLE001 - diagnóstico: no queremos un 500 opaco
-        import traceback
+    except Exception as exc:  # noqa: BLE001 - no exponer un 500 opaco al cliente
         return {"channel": "error", "result": f"{type(exc).__name__}: {exc}",
-                "ok": False, "trace": traceback.format_exc()[-600:]}
+                "ok": False}
 
 
 @app.post("/v1/org/alert-channel")

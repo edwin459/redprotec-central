@@ -219,6 +219,34 @@ class AlertChannelConfigTest(unittest.TestCase):
     def test_tg_escape_reserved_chars(self):
         self.assertEqual(main._tg_escape("a.b-c!"), "a\\.b\\-c\\!")
 
+    def test_push_telegram_builds_valid_json_payload(self):
+        # Regresión: main.py debía importar json (lo usa _push_telegram). Ejercita
+        # la función REAL con un opener simulado (sin red) → payload JSON válido.
+        import json as _json
+
+        captured = {}
+
+        class _Resp:
+            status = 200
+
+        class _Opener:
+            def open(self, req, timeout=None):
+                captured["url"] = req.full_url
+                captured["body"] = req.data
+                return _Resp()
+
+        orig = main._IPV4_OPENER
+        main._IPV4_OPENER = _Opener()
+        try:
+            res = main._push_telegram("123:ABC", "999", "Título.", "Cuerpo con áé!")
+        finally:
+            main._IPV4_OPENER = orig
+        self.assertTrue(res.startswith("ok"))
+        self.assertIn("/bot123:ABC/sendMessage", captured["url"])
+        body = _json.loads(captured["body"].decode("utf-8"))  # JSON válido
+        self.assertEqual(body["chat_id"], "999")
+        self.assertIn("Cuerpo", body["text"])
+
 
 if __name__ == "__main__":
     unittest.main()
