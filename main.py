@@ -47,6 +47,12 @@ logger = logging.getLogger("redprotec.central")
 # transición en-línea→sin-conexión y avisa al tema de la organización.
 OFFLINE_ALERT_SECONDS = int(os.environ.get("OFFLINE_ALERT_SECONDS", "210"))
 WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("WATCHDOG_INTERVAL_SECONDS", "60"))
+# On-call / Escalación: si nadie CONFIRMA (ack) un incidente de caída, el relay
+# reenvía recordatorios cada vez más urgentes hasta MAX_ESCALATIONS. Así una
+# caída no se "pierde" porque el primer aviso pasó desapercibido — lo que hace
+# que un equipo de TI (o una familia) dependa del sistema.
+ESCALATION_INTERVAL_SECONDS = int(os.environ.get("ESCALATION_INTERVAL_SECONDS", "300"))
+MAX_ESCALATIONS = int(os.environ.get("MAX_ESCALATIONS", "3"))
 
 # Observabilidad del watchdog (sin secretos): permite verificar en /stats que el
 # bucle realmente corre en producción y por qué (o si) no está emitiendo. Un
@@ -80,7 +86,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.5", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.6", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -431,6 +437,36 @@ def compose_site_up_message(site_name: str, down_seconds: float) -> tuple[str, s
     )
 
 
+def decide_escalation(
+    incident: dict | None, now: datetime, interval: int, max_esc: int
+) -> bool:
+    """PURA: ¿toca reenviar un recordatorio de escalado? True solo si el incidente
+    sigue ABIERTO, NADIE lo confirmó, no se superó el máximo de escalados, y pasó
+    el intervalo desde el último aviso."""
+    if not incident or not incident.get("incident_open"):
+        return False
+    if incident.get("acked"):
+        return False
+    if int(incident.get("escalation_level", 0)) >= max_esc:
+        return False
+    last = incident.get("last_alert_at")
+    if not isinstance(last, datetime):
+        return False
+    return (now - last).total_seconds() >= interval
+
+
+def compose_site_escalation_message(
+    site_name: str, down_seconds: float, level: int
+) -> tuple[str, str]:
+    dur = _humanize_seconds(down_seconds)
+    return (
+        f"RedProtec — {site_name}: SIGUE CAÍDA (recordatorio {level})",
+        f"⚠️ «{site_name}» lleva {dur} sin conexión y nadie ha confirmado el aviso. "
+        f"Abre RedProtec → Incidentes y pulsa «Enterado» para detener los "
+        f"recordatorios, o atiende la caída.",
+    )
+
+
 def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
     """Revisa TODAS las sedes y avisa las transiciones de conexión. Devuelve la
     lista de (org, site_id, evento) emitidos (para pruebas). Los pushes se envían
@@ -474,8 +510,15 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
 
             if event == "down":
                 title, body = compose_site_down_message(rec.get("site_name") or site_id)
+                # Abre un INCIDENTE: down_at, sin confirmar, nivel 0.
+                store_state = {
+                    "state": "offline", "since": now,
+                    "incident_open": True, "down_at": now,
+                    "acked": False, "escalation_level": 0,
+                    "last_alert_at": now,
+                }
                 pending.append({"org": org, "site_id": site_id, "event": event,
-                                "new_state": "offline", "since": now,
+                                "store_state": store_state,
                                 "title": title, "body": body,
                                 "prio": "high", "tags": "rotating_light"})
                 emitted.append((org, site_id, event))
@@ -489,14 +532,37 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
                 title, body = compose_site_up_message(
                     rec.get("site_name") or site_id, down_secs
                 )
+                # Cierra el incidente.
+                store_state = {"state": "online", "since": now,
+                               "incident_open": False}
                 pending.append({"org": org, "site_id": site_id, "event": event,
-                                "new_state": "online", "since": now,
+                                "store_state": store_state,
                                 "title": title, "body": body,
                                 "prio": "default", "tags": "white_check_mark"})
                 emitted.append((org, site_id, event))
+            elif new_state == "offline" and decide_escalation(
+                    prev, now, ESCALATION_INTERVAL_SECONDS, MAX_ESCALATIONS):
+                # Sigue caída y NADIE confirmó → recordatorio de escalado.
+                level = int((prev or {}).get("escalation_level", 0)) + 1
+                down_at = (prev or {}).get("down_at", now)
+                down_secs = (
+                    (now - down_at).total_seconds()
+                    if isinstance(down_at, datetime) else 0.0
+                )
+                title, body = compose_site_escalation_message(
+                    rec.get("site_name") or site_id, down_secs, level)
+                store_state = {**(prev or {}), "state": "offline",
+                               "escalation_level": level, "last_alert_at": now}
+                pending.append({"org": org, "site_id": site_id, "event": "escalate",
+                                "store_state": store_state,
+                                "title": title, "body": body,
+                                "prio": "high", "tags": "warning"})
+                emitted.append((org, site_id, "escalate"))
             else:
-                # Sembrado inicial o sin cambio: persistir de una vez (no notifica).
+                # Sembrado inicial o sin cambio: persistir de una vez (no notifica),
+                # PRESERVANDO los campos del incidente si los hubiera.
                 org_watch[site_id] = {
+                    **(prev or {}),
                     "state": new_state,
                     "since": (prev or {}).get("since", now),
                 }
@@ -524,10 +590,16 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
     # Las fallidas se dejan sin confirmar → el próximo tick las reintenta.
     with _WATCH_LOCK:
         for act in pending:
-            if act.get("confirm"):
-                _SITE_WATCH.setdefault(act["org"], {})[act["site_id"]] = {
-                    "state": act["new_state"], "since": act["since"],
-                }
+            if not act.get("confirm"):
+                continue
+            org_watch = _SITE_WATCH.setdefault(act["org"], {})
+            # Si el usuario CONFIRMÓ entre la decisión y el commit, respeta el ack
+            # (no re-escales sobre un incidente ya atendido).
+            if act["event"] == "escalate":
+                cur = org_watch.get(act["site_id"])
+                if cur and cur.get("acked"):
+                    continue
+            org_watch[act["site_id"]] = act["store_state"]
     return emitted
 
 
@@ -1300,6 +1372,50 @@ def availability(p: Principal = Depends(principal)) -> dict:
         },
         "generated_at": now.isoformat(),
     }
+
+
+@app.get("/v1/incidents")
+def incidents(p: Principal = Depends(principal)) -> dict:
+    """**On-call:** incidentes ABIERTOS (sedes caídas) del alcance de quien llama,
+    con si están CONFIRMADOS y su nivel de escalado. La app los muestra para poder
+    pulsar «Enterado» y detener los recordatorios."""
+    now = _now()
+    with _WATCH_LOCK:
+        org_watch = {k: dict(v) for k, v in _SITE_WATCH.get(p.org_token, {}).items()}
+    out: list[dict] = []
+    for site_id, st in org_watch.items():
+        if not p.sees_site(site_id) or not st.get("incident_open"):
+            continue
+        rec = store.get_site(p.org_token, site_id)
+        down_at = st.get("down_at")
+        down_secs = (
+            (now - down_at).total_seconds() if isinstance(down_at, datetime) else 0.0
+        )
+        out.append({
+            "site_id": site_id,
+            "site_name": (rec or {}).get("site_name") or site_id,
+            "down_since": down_at.isoformat() if isinstance(down_at, datetime) else None,
+            "down_seconds": int(down_secs),
+            "acked": bool(st.get("acked")),
+            "escalation_level": int(st.get("escalation_level", 0)),
+        })
+    # Sin confirmar primero, luego los más antiguos.
+    out.sort(key=lambda x: (x["acked"], -x["down_seconds"]))
+    return {"incidents": out, "generated_at": now.isoformat()}
+
+
+@app.post("/v1/incidents/{site_id}/ack")
+def ack_incident(site_id: str, p: Principal = Depends(principal)) -> dict:
+    """Confirma («Enterado») un incidente: detiene los recordatorios de escalado.
+    Cualquiera con alcance a la sede puede confirmar (está de guardia)."""
+    if not p.sees_site(site_id):
+        raise HTTPException(status_code=403, detail="Sede fuera de tu alcance")
+    with _WATCH_LOCK:
+        st = _SITE_WATCH.get(p.org_token, {}).get(site_id)
+        if not st or not st.get("incident_open"):
+            raise HTTPException(status_code=404, detail="No hay incidente abierto en esa sede")
+        st["acked"] = True
+    return {"ok": True}
 
 
 @app.get("/v1/inventory")

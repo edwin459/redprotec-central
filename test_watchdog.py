@@ -158,6 +158,98 @@ class WatchdogTickTest(unittest.TestCase):
         self.assertEqual(e4, [])
 
 
+    # ── On-call: escalado + confirmación (ack) ──────────────────────────────
+    def test_escalation_reminders_until_acked(self):
+        now = main._now()
+        self._seed_site("bogota", now)
+        main._watchdog_tick(now)  # baseline online
+        down_at = now + timedelta(seconds=main.OFFLINE_ALERT_SECONDS + 30)
+        main._watchdog_tick(down_at)  # 'down' → push 1, abre incidente
+        self.assertEqual(len(self.pushes), 1)
+        # Antes del intervalo de escalado: no re-avisa.
+        main._watchdog_tick(down_at + timedelta(seconds=60))
+        self.assertEqual(len(self.pushes), 1)
+        # Pasado el intervalo y SIN confirmar: recordatorio de escalado.
+        esc_at = down_at + timedelta(seconds=main.ESCALATION_INTERVAL_SECONDS + 5)
+        e = main._watchdog_tick(esc_at)
+        self.assertEqual([x[2] for x in e], ["escalate"])
+        self.assertEqual(len(self.pushes), 2)
+        self.assertIn("SIGUE CAÍDA", self.pushes[-1][1])
+        # Confirmar detiene los recordatorios.
+        main.ack_incident("bogota", p=main._resolve_principal(self.org))
+        e2 = main._watchdog_tick(
+            esc_at + timedelta(seconds=main.ESCALATION_INTERVAL_SECONDS + 5))
+        self.assertEqual(e2, [])
+        self.assertEqual(len(self.pushes), 2)  # no más avisos
+
+    def test_escalation_stops_at_max(self):
+        now = main._now()
+        self._seed_site("bogota", now)
+        main._watchdog_tick(now)
+        down_at = now + timedelta(seconds=main.OFFLINE_ALERT_SECONDS + 30)
+        main._watchdog_tick(down_at)  # down
+        t = down_at
+        for _ in range(main.MAX_ESCALATIONS + 2):
+            t = t + timedelta(seconds=main.ESCALATION_INTERVAL_SECONDS + 5)
+            main._watchdog_tick(t)
+        # 1 (down) + MAX_ESCALATIONS recordatorios, y no más.
+        self.assertEqual(len(self.pushes), 1 + main.MAX_ESCALATIONS)
+
+    def test_incidents_endpoint_and_ack(self):
+        now = main._now()
+        self._seed_site("bogota", now)
+        main._watchdog_tick(now)
+        main._watchdog_tick(now + timedelta(seconds=main.OFFLINE_ALERT_SECONDS + 30))
+        p = main._resolve_principal(self.org)
+        inc = main.incidents(p=p)["incidents"]
+        self.assertEqual(len(inc), 1)
+        self.assertEqual(inc[0]["site_id"], "bogota")
+        self.assertFalse(inc[0]["acked"])
+        main.ack_incident("bogota", p=p)
+        self.assertTrue(main.incidents(p=p)["incidents"][0]["acked"])
+
+    def test_recovery_closes_incident(self):
+        now = main._now()
+        self._seed_site("bogota", now)
+        main._watchdog_tick(now)
+        down_at = now + timedelta(seconds=main.OFFLINE_ALERT_SECONDS + 30)
+        main._watchdog_tick(down_at)  # down
+        back = down_at + timedelta(minutes=5)
+        self._seed_site("bogota", back)
+        main._watchdog_tick(back)  # up → cierra incidente
+        self.assertEqual(main.incidents(p=main._resolve_principal(self.org))["incidents"], [])
+
+
+class DecideEscalationTest(unittest.TestCase):
+    def _inc(self, **kw):
+        base = {"incident_open": True, "acked": False, "escalation_level": 0,
+                "last_alert_at": main._now() - timedelta(seconds=301)}
+        base.update(kw)
+        return base
+
+    def test_none_incident(self):
+        self.assertFalse(main.decide_escalation(None, main._now(), 300, 3))
+
+    def test_open_unacked_due(self):
+        self.assertTrue(main.decide_escalation(self._inc(), main._now(), 300, 3))
+
+    def test_not_due_yet(self):
+        inc = self._inc(last_alert_at=main._now() - timedelta(seconds=100))
+        self.assertFalse(main.decide_escalation(inc, main._now(), 300, 3))
+
+    def test_acked_stops(self):
+        self.assertFalse(
+            main.decide_escalation(self._inc(acked=True), main._now(), 300, 3))
+
+    def test_max_reached(self):
+        self.assertFalse(
+            main.decide_escalation(self._inc(escalation_level=3), main._now(), 300, 3))
+
+    def test_closed_incident(self):
+        self.assertFalse(
+            main.decide_escalation(self._inc(incident_open=False), main._now(), 300, 3))
+
+
 class AlertRoutingTest(unittest.TestCase):
     """El watchdog en la nube prefiere Telegram (Railway alcanza api.telegram.org;
     ntfy.sh está bloqueado). ntfy queda como respaldo."""
