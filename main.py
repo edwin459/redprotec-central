@@ -79,7 +79,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.8.6", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.8.7", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -666,6 +666,33 @@ def download_info() -> dict:
         "version": AGENT_VERSION or None,
         "url": AGENT_DOWNLOAD_URL or None,
     }
+
+
+@app.get("/v1/netcheck")
+def netcheck(p: Principal = Depends(require_master)) -> dict:
+    """Diagnóstico de EGRESS: qué destinos alcanza el relay (para elegir el canal
+    de alertas). El push a ntfy.sh desde el PaaS resultó bloqueado/lento; esto
+    prueba alternativas (Telegram, etc.) desde el propio contenedor. Solo dueño."""
+    targets = {
+        "ntfy_ipv4": ("https://ntfy.sh/", True),
+        "ntfy_default": ("https://ntfy.sh/", False),
+        "telegram": ("https://api.telegram.org/", True),
+        "google204": ("https://www.google.com/generate_204", True),
+        "cloudflare": ("https://cloudflare.com/cdn-cgi/trace", True),
+    }
+    out: dict = {}
+    for name, (url, ipv4) in targets.items():
+        opener = _IPV4_OPENER if (ipv4 and url.startswith("https://")) else urllib.request
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(url, method="GET")
+            resp = opener.open(req, timeout=8)  # noqa: S310
+            out[name] = {"ok": True, "status": getattr(resp, "status", "?"),
+                         "ms": int((time.time() - t0) * 1000)}
+        except Exception as exc:  # noqa: BLE001
+            out[name] = {"ok": False, "err": f"{type(exc).__name__}:{str(exc)[:80]}",
+                         "ms": int((time.time() - t0) * 1000)}
+    return {"egress": out}
 
 
 @app.get("/stats")
