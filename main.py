@@ -18,9 +18,11 @@ cambia ninguna respuesta: los endpoints hablan solo con la interfaz `Store`.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import logging
 import os
 import secrets
+import socket
 import threading
 import urllib.request
 import uuid
@@ -76,7 +78,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.8.4", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.8.5", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -234,6 +236,34 @@ class Principal:
         return self.sites == ["*"] or site_id in self.sites
 
 
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS forzando IPv4. Railway (y otros PaaS) suelen NO tener salida IPv6;
+    como ntfy.sh publica AAAA, la resolución elegía IPv6 y el POST fallaba con
+    'Network is unreachable' (Errno 101) de forma intermitente. Forzar IPv4 hace
+    la entrega determinista sin depender del orden de getaddrinfo."""
+
+    def connect(self):
+        infos = socket.getaddrinfo(
+            self.host, self.port, socket.AF_INET, socket.SOCK_STREAM
+        )
+        af, socktype, proto, _canon, sa = infos[0]
+        sock = socket.socket(af, socktype, proto)
+        if self.timeout is not None:
+            sock.settimeout(self.timeout)
+        if self.source_address:
+            sock.bind(self.source_address)
+        sock.connect(sa)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_IPv4HTTPSConnection, req, context=self._context)
+
+
+_IPV4_OPENER = urllib.request.build_opener(_IPv4HTTPSHandler())
+
+
 def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, tags: str) -> str:
     """Envía un push a ntfy (best-effort). El relay es el ÚNICO que ve todas las
     sedes 24/7, así que es el lugar correcto para alertar al dueño de la org.
@@ -250,7 +280,10 @@ def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, ta
             method="POST",
             headers={"Title": safe_title, "Priority": priority, "Tags": tags},
         )
-        resp = urllib.request.urlopen(req, timeout=8)  # noqa: S310
+        # Forzar IPv4 (ver _IPv4HTTPSConnection). Si la URL fuese http:// (tema
+        # personalizado sin TLS) cae al opener normal.
+        opener = _IPV4_OPENER if url.startswith("https://") else urllib.request
+        resp = opener.open(req, timeout=8)  # noqa: S310
         return f"ok:{getattr(resp, 'status', '?')}"
     except Exception as exc:  # noqa: BLE001
         return f"ERR:{type(exc).__name__}:{str(exc)[:120]}"
