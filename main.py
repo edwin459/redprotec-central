@@ -58,6 +58,7 @@ _WDIAG: dict = {
     # Decisión por sede RECIENTE (age<1h) del último tick: edad/estado previo/
     # evento. Sin nombres de sede ni org → no filtra datos. Solo para diagnóstico.
     "last_recent": [],
+    "last_push": [],        # resultado de cada _push_ntfy del último tick con emisión
 }
 
 
@@ -75,7 +76,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.8.3", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.8.4", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -233,11 +234,12 @@ class Principal:
         return self.sites == ["*"] or site_id in self.sites
 
 
-def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, tags: str) -> None:
+def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, tags: str) -> str:
     """Envía un push a ntfy (best-effort). El relay es el ÚNICO que ve todas las
-    sedes 24/7, así que es el lugar correcto para alertar al dueño de la org."""
+    sedes 24/7, así que es el lugar correcto para alertar al dueño de la org.
+    Devuelve 'ok' | 'no_topic' | 'ERR:<detalle>' para observabilidad (nunca lanza)."""
     if not topic or not topic.strip():
-        return
+        return "no_topic"
     t = topic.strip()
     url = t if t.startswith("http") else f"https://ntfy.sh/{t}"
     safe_title = title.encode("ascii", "ignore").decode().strip() or "RedProtec"
@@ -248,9 +250,10 @@ def _push_ntfy(topic: str | None, title: str, message: str, *, priority: str, ta
             method="POST",
             headers={"Title": safe_title, "Priority": priority, "Tags": tags},
         )
-        urllib.request.urlopen(req, timeout=8)  # noqa: S310
-    except Exception:
-        pass
+        resp = urllib.request.urlopen(req, timeout=8)  # noqa: S310
+        return f"ok:{getattr(resp, 'status', '?')}"
+    except Exception as exc:  # noqa: BLE001
+        return f"ERR:{type(exc).__name__}:{str(exc)[:120]}"
 
 
 def _fmt_device(d: dict) -> str:
@@ -402,10 +405,15 @@ def _watchdog_tick(now: datetime) -> list[tuple[str, str, str]]:
     _WDIAG["last_recent"] = recent
 
     # Fase 3: resolver el tema de cada org (store) y enviar los pushes.
+    push_diag: list[str] = []
     for org, title, body, prio, tags in to_push:
         topic = store.get_org_config(org).get("alert_topic")
         if topic:
-            _push_ntfy(topic, title, body, priority=prio, tags=tags)
+            push_diag.append(_push_ntfy(topic, title, body, priority=prio, tags=tags))
+        else:
+            push_diag.append("no_topic_for_org")
+    if push_diag:
+        _WDIAG["last_push"] = push_diag
     return emitted
 
 
@@ -604,6 +612,7 @@ def stats() -> dict:
         "last_max_age": _WDIAG["last_max_age"],
         "last_emitted": _WDIAG["last_emitted"],
         "last_recent": _WDIAG["last_recent"],
+        "last_push": _WDIAG["last_push"],
         "interval_s": WATCHDOG_INTERVAL_SECONDS,
         "threshold_s": OFFLINE_ALERT_SECONDS,
     }
