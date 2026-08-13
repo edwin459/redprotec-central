@@ -31,11 +31,12 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from auth import verify_supabase_jwt
+from ratelimit import FailureLockout, SlidingWindow, client_ip, int_env
 from store import create_store
 
 logger = logging.getLogger("redprotec.central")
@@ -90,7 +91,46 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.17", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.18", lifespan=lifespan)
+
+# ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
+# Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
+# de auth (401/403) para frenar fuerza bruta del ADMIN_TOKEN o de tokens.
+_RL_GLOBAL = SlidingWindow(
+    int_env("RL_GLOBAL_MAX", 600), int_env("RL_GLOBAL_WINDOW", 60))
+_RL_LOCKOUT = FailureLockout(
+    int_env("RL_FAIL_MAX", 15), int_env("RL_FAIL_WINDOW", 300),
+    int_env("RL_LOCK_SECONDS", 600))
+# Rutas exentas del límite (chequeos de salud del hosting).
+_RL_EXEMPT = {"/health", "/"}
+
+
+@app.middleware("http")
+async def _rate_limit(request: Request, call_next):
+    """Aplica límite global y bloqueo por fallos de auth ANTES de cada endpoint.
+    Un 401/403 cuenta como fallo; un 2xx/3xx limpia el historial de esa IP."""
+    if request.url.path in _RL_EXEMPT:
+        return await call_next(request)
+    ip = client_ip(
+        request.headers, request.client.host if request.client else "")
+    if _RL_LOCKOUT.is_locked(ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Demasiados intentos fallidos. Espera unos "
+                               "minutos e inténtalo de nuevo."},
+            headers={"Retry-After": str(_RL_LOCKOUT.lock)})
+    if not _RL_GLOBAL.hit(ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Demasiadas peticiones. Baja el ritmo."},
+            headers={"Retry-After": "30"})
+    response = await call_next(request)
+    if response.status_code in (401, 403):
+        _RL_LOCKOUT.record_failure(ip)
+    elif response.status_code < 400:
+        _RL_LOCKOUT.record_success(ip)
+    return response
+
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una

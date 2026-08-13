@@ -29,6 +29,38 @@ logger = logging.getLogger(__name__)
 # El claim `aud` de un usuario autenticado en Supabase.
 _AUD = os.environ.get("SUPABASE_JWT_AUD", "authenticated")
 
+# Tolerancia de reloj (segundos) al validar `exp`/`iat`: pequeña a propósito
+# —solo absorbe desfases normales de reloj, no alarga la vida de un token—.
+_LEEWAY = 10
+
+
+def _issuer() -> str | None:
+    """Emisor esperado de los JWT de Supabase: `{SUPABASE_URL}/auth/v1`. Se lee
+    en caliente para no exigir recargar el módulo en pruebas/despliegue."""
+    base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    return f"{base}/auth/v1" if base else None
+
+
+def _require_asymmetric() -> bool:
+    """Si `AUTH_REQUIRE_ASYMMETRIC` está activo, el relay RECHAZA firmas simétricas
+    (HS256) y solo acepta RS256/ES256 verificadas contra el JWKS público. Así el
+    relay nunca guarda un secreto capaz de FIRMAR (falsificar) identidades: solo
+    claves públicas de verificación. Es el objetivo P0.2."""
+    return os.environ.get("AUTH_REQUIRE_ASYMMETRIC", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _post_validate(claims: dict) -> dict | None:
+    """Verificación extra tras validar la firma: si tenemos emisor configurado y
+    el token trae `iss`, deben coincidir (defensa contra tokens de otro proyecto).
+    No se EXIGE `iss` para no romper tokens antiguos que no lo incluyan."""
+    expected = _issuer()
+    tok_iss = (claims.get("iss") or "").rstrip("/")
+    if expected and tok_iss and tok_iss != expected:
+        logger.debug("JWT rechazado: emisor %s ≠ %s", tok_iss, expected)
+        return None
+    return claims
+
 # Cliente JWKS perezoso (para firmas asimétricas). Cachea las llaves.
 _jwk_client = None
 _jwk_client_ready = False
@@ -79,24 +111,33 @@ def verify_supabase_jwt(token: str) -> dict | None:
         return None
     alg = header.get("alg", "")
 
+    _opts = {"require": ["exp", "sub"]}
     try:
         if alg == "HS256":
+            # P0.2: si se exige firma asimétrica, un HS256 se rechaza aunque la
+            # firma cuadre (el secreto simétrico puede FALSIFICAR identidades).
+            if _require_asymmetric():
+                logger.warning(
+                    "JWT HS256 rechazado: AUTH_REQUIRE_ASYMMETRIC exige RS256/ES256.")
+                return None
             secret = os.environ.get("SUPABASE_JWT_SECRET", "").strip()
             if not secret:
                 return None
-            return jwt.decode(
+            claims = jwt.decode(
                 token, secret, algorithms=["HS256"], audience=_AUD,
-                options={"require": ["exp", "sub"]},
+                leeway=_LEEWAY, options=_opts,
             )
+            return _post_validate(claims)
         if alg in ("RS256", "ES256"):
             client = _get_jwk_client()
             if client is None:
                 return None
             signing_key = client.get_signing_key_from_jwt(token).key
-            return jwt.decode(
+            claims = jwt.decode(
                 token, signing_key, algorithms=[alg], audience=_AUD,
-                options={"require": ["exp", "sub"]},
+                leeway=_LEEWAY, options=_opts,
             )
+            return _post_validate(claims)
     except Exception as exc:  # noqa: BLE001 - firma/exp/aud inválidos → None
         logger.debug("JWT de Supabase rechazado: %s", exc)
         return None

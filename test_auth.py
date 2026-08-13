@@ -16,10 +16,13 @@ TEST_SECRET = "test-supabase-jwt-secret-0123456789abcdef"
 
 
 def _mint(sub: str, *, email: str = "", exp_delta: int = 3600,
-          aud: str = "authenticated", secret: str = TEST_SECRET) -> str:
+          aud: str = "authenticated", secret: str = TEST_SECRET,
+          iss: str | None = None) -> str:
     payload = {"sub": sub, "aud": aud, "exp": int(time.time()) + exp_delta}
     if email:
         payload["email"] = email
+    if iss:
+        payload["iss"] = iss
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
@@ -64,6 +67,34 @@ class SupabaseAuthTests(unittest.TestCase):
     def test_no_secret_configured_no_verification(self):
         os.environ.pop("SUPABASE_JWT_SECRET", None)
         self.assertIsNone(self.auth.verify_supabase_jwt(_mint("user-A")))
+
+    # ── P0.2: endurecimiento ─────────────────────────────────────────────
+    def test_require_asymmetric_rejects_hs256(self):
+        """Con AUTH_REQUIRE_ASYMMETRIC, un HS256 se rechaza aunque la firma cuadre
+        (el relay no debe confiar en un secreto capaz de FIRMAR identidades)."""
+        os.environ["AUTH_REQUIRE_ASYMMETRIC"] = "1"
+        try:
+            self.assertIsNone(
+                self.auth.verify_supabase_jwt(_mint("user-A", email="a@x.com")))
+        finally:
+            os.environ.pop("AUTH_REQUIRE_ASYMMETRIC", None)
+        # Sin la bandera, el mismo token se acepta (compat).
+        self.assertIsNotNone(self.auth.verify_supabase_jwt(_mint("user-A")))
+
+    def test_issuer_mismatch_rejected_when_url_set(self):
+        """Con SUPABASE_URL fijado, un token cuyo `iss` es de OTRO proyecto se
+        rechaza; el del proyecto correcto se acepta. Un token sin `iss` sigue
+        pasando (no se exige, por compat)."""
+        os.environ["SUPABASE_URL"] = "https://proj.supabase.co"
+        try:
+            good = _mint("user-A", iss="https://proj.supabase.co/auth/v1")
+            evil = _mint("user-A", iss="https://evil.example.com/auth/v1")
+            self.assertIsNotNone(self.auth.verify_supabase_jwt(good))
+            self.assertIsNone(self.auth.verify_supabase_jwt(evil))
+            # Sin iss → se acepta (no se exige el claim).
+            self.assertIsNotNone(self.auth.verify_supabase_jwt(_mint("user-A")))
+        finally:
+            os.environ.pop("SUPABASE_URL", None)
 
     # ── principal(): identidad SaaS ──────────────────────────────────────
     def test_principal_from_jwt_is_owner_of_own_org(self):
