@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.15", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.16", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -1898,6 +1898,9 @@ def get_entitlement(p: Principal = Depends(principal)) -> dict:
     # esto es true (a los usuarios normales nunca les aparece).
     ent["is_partner"] = _is_partner(p.org_token)
     ent["partner_clients"] = len(_partner_clients(p.org_token)) if ent["is_partner"] else 0
+    # ¿Esta cuenta (cliente) está gestionada por un socio? (se vinculó con un
+    # código). La app se lo muestra y le permite revocar el acceso.
+    ent["managed_by_partner"] = bool(store.kv_get(f"managed_by::{p.org_token}"))
     return ent
 
 
@@ -1957,6 +1960,14 @@ def require_partner_account(p: Principal = Depends(principal)) -> Principal:
 
 class PartnerClientIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+
+
+class PartnerInviteIn(BaseModel):
+    name: str = Field(default="", max_length=120)
+
+
+class PartnerJoinIn(BaseModel):
+    code: str = Field(min_length=4, max_length=40)
 
 
 class PartnerFlagIn(BaseModel):
@@ -2119,6 +2130,56 @@ def partner_remove_client(
         store.remove_site(client_org, site_id)
     with _WATCH_LOCK:
         _SITE_WATCH.pop(client_org, None)
+    return {"ok": True}
+
+
+@app.post("/v1/partner/invite")
+def partner_invite(
+    body: PartnerInviteIn, p: Principal = Depends(require_partner_account)
+) -> dict:
+    """El socio genera un **código de invitación** para un cliente. Se lo envía; el
+    cliente lo pega en SU app (`/v1/partner/join`) y así vincula su red al socio —
+    con su propia cuenta y su consentimiento. No hace falta ir a la sede."""
+    code = "RP-" + secrets.token_hex(4).upper()  # p.ej. RP-1A2B3C4D
+    store.kv_set(f"pinvite::{code}", json.dumps(
+        {"partner_org": p.org_token, "partner_name": p.name or "Socio",
+         "name": body.name.strip()}))
+    return {"ok": True, "code": code, "name": body.name.strip()}
+
+
+@app.post("/v1/partner/join")
+def partner_join(body: PartnerJoinIn, p: Principal = Depends(principal)) -> dict:
+    """El CLIENTE pega el código en su app → vincula SU organización (su red) al
+    socio que lo invitó, dándole acceso. Código de un solo uso."""
+    code = body.code.strip().upper()
+    raw = store.kv_get(f"pinvite::{code}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="Código no válido o ya usado")
+    inv = json.loads(raw)
+    partner_org = inv.get("partner_org")
+    name = inv.get("name") or "Cliente"
+    if partner_org == p.org_token:
+        raise HTTPException(status_code=400, detail="No puedes vincularte a ti mismo")
+    items = _partner_clients(partner_org)
+    if not any(it.get("org") == p.org_token for it in items):
+        items.append({"org": p.org_token, "name": name})
+        _set_partner_clients(partner_org, items)
+    # El cliente sabe quién lo gestiona (transparencia); consume el código.
+    store.kv_set(f"managed_by::{p.org_token}", partner_org)
+    store.kv_set(f"pinvite::{code}", "")  # un solo uso
+    return {"ok": True, "partner_name": inv.get("partner_name") or "tu proveedor"}
+
+
+@app.post("/v1/partner/leave")
+def partner_leave(p: Principal = Depends(principal)) -> dict:
+    """El CLIENTE revoca el acceso de su proveedor: se saca de la cartera del socio
+    y limpia la relación. (El cliente manda sobre su propia red.)"""
+    partner_org = store.kv_get(f"managed_by::{p.org_token}")
+    if partner_org:
+        items = _partner_clients(partner_org)
+        _set_partner_clients(
+            partner_org, [it for it in items if it.get("org") != p.org_token])
+        store.kv_set(f"managed_by::{p.org_token}", "")
     return {"ok": True}
 
 

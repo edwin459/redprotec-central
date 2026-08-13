@@ -590,6 +590,32 @@ class PartnerAccountTests(unittest.TestCase):
         self.assertEqual(main.partner_clients(p=p)["fleet"], [])  # fuera de cartera
         self.assertIsNone(main.store.resolve_agent_token(token))  # token revocado
 
+    def test_invite_code_join_and_leave(self):
+        self._promote(self.partner)
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        inv = main.partner_invite(
+            main.PartnerInviteIn(name="Ferretería Norte"), p=p)
+        code = inv["code"]
+        self.assertTrue(code.startswith("RP-"))
+        # el CLIENTE (otra cuenta) pega el código en su app
+        client = main._resolve_principal("client-account-9")
+        out = main.partner_join(main.PartnerJoinIn(code=code), p=client)
+        self.assertTrue(out["ok"])
+        # aparece en la consola del socio con su nombre
+        by = {f["org"]: f for f in main.partner_clients(p=p)["fleet"]}
+        self.assertIn("client-account-9", by)
+        self.assertEqual(by["client-account-9"]["client_name"], "Ferretería Norte")
+        # el cliente ve que está gestionado por un socio
+        ent = main.get_entitlement(p=main._resolve_principal("client-account-9"))
+        self.assertTrue(ent["managed_by_partner"])
+        # código de UN SOLO USO
+        with self.assertRaises(HTTPException):
+            main.partner_join(main.PartnerJoinIn(code=code),
+                              p=main._resolve_principal("otra-cuenta"))
+        # el cliente puede REVOCAR el acceso
+        main.partner_leave(p=client)
+        self.assertEqual(main.partner_clients(p=p)["fleet"], [])
+
 
 class AuditLogTests(unittest.TestCase):
     """Bitácora de auditoría: los comandos remotos quedan registrados por org."""
