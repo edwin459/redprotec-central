@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.16", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.17", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -108,6 +108,12 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
 # separados por coma. Vacío = nadie es dueño (comportamiento normal). Se configura
 # por entorno en el host; no es un secreto (son identificadores, no credenciales).
 OWNER_ORGS = {x.strip() for x in os.environ.get("OWNER_ORG_IDS", "").split(",") if x.strip()}
+
+# Prefijo de los tokens de AGENTE (los emite el relay al vincular una sede a una
+# cuenta). Un token con este prefijo SIEMPRE debe resolver a una org; si no
+# resuelve, está revocado o es desconocido y se RECHAZA (no se convierte en una
+# org fantasma). Ver `principal()`.
+AGENT_TOKEN_PREFIX = "rp_agent_"
 
 _LOCK = threading.Lock()
 # org_token -> site_id -> record{ site_name, summary, devices, updated_at }
@@ -948,6 +954,17 @@ def principal(authorization: str | None = Header(default=None)) -> Principal:
     agent_org = store.resolve_agent_token(token)
     if agent_org:
         return Principal(agent_org, "owner", ["*"], True, "Agente")
+    # Endurecimiento: un token de AGENTE que ya NO resuelve (revocado o desconocido)
+    # se RECHAZA. Antes caía a `_resolve_principal`, que lo trataba como su propia
+    # org maestra → aparecía una "sede fantasma" online y la sede real de la cuenta
+    # quedaba congelada (sin conexión). Ahora el agente recibe 401 y debe volver a
+    # vincular la sede a la cuenta (emite un token válido). Los tokens de org
+    # MANUALES (sin este prefijo) siguen funcionando como antes.
+    if token.startswith(AGENT_TOKEN_PREFIX):
+        raise HTTPException(
+            status_code=401,
+            detail="Token de agente revocado o desconocido. Vuelve a vincular la "
+                   "sede a tu cuenta desde la app (Mi cuenta → Vincular esta sede).")
     return _resolve_principal(token)
 
 
@@ -1859,7 +1876,7 @@ def create_agent_token(
     """Emite un token de AGENTE ligado a la organización de quien llama (su
     cuenta). La app lo pide con la sesión iniciada y lo guarda en el agente para
     que esa sede reporte a la cuenta. Solo el dueño/cuenta (token maestro)."""
-    token = "rp_agent_" + secrets.token_urlsafe(24)
+    token = AGENT_TOKEN_PREFIX + secrets.token_urlsafe(24)
     label = (body.label if body else "") or "Sede"
     store.create_agent_token(p.org_token, token, label, _now())
     return {"ok": True, "token": token, "label": label}
@@ -2086,7 +2103,7 @@ def partner_create_client(
     devuelve un **token de agente** para instalar en la sede de ese cliente. Cada
     cliente reporta a su propia org → datos separados."""
     client_org = "client_" + secrets.token_urlsafe(16)
-    agent_token = "rp_agent_" + secrets.token_urlsafe(24)
+    agent_token = AGENT_TOKEN_PREFIX + secrets.token_urlsafe(24)
     store.create_agent_token(client_org, agent_token, body.name.strip(), _now())
     items = _partner_clients(p.org_token)
     items.append({"org": client_org, "name": body.name.strip()})

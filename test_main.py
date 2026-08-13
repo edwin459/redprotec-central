@@ -236,14 +236,33 @@ class CloudRbacTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["label"], "A")
 
-    def test_agent_token_revoke(self):
+    def test_agent_token_revoke_is_rejected(self):
+        """Endurecimiento: un token de agente REVOCADO ya NO se convierte en una org
+        fantasma. `principal()` lo RECHAZA con 401 para que el agente vuelva a
+        vincular la sede a la cuenta (así la sede real no queda «sin conexión» en
+        silencio mientras un fantasma reporta por su cuenta)."""
         a = main._resolve_principal("cuenta-A")
         tok = main.create_agent_token(main.AgentTokenIn(label="A"), p=a)["token"]
         main.revoke_agent_token(tok, p=a)
-        # Ya no resuelve a la org de la cuenta (cae al modelo opaco = su propio token).
-        p_after = main.principal(authorization=f"Bearer {tok}")
-        self.assertEqual(p_after.org_token, tok)  # opaco: org keyed por el token
+        with self.assertRaises(HTTPException) as ctx:
+            main.principal(authorization=f"Bearer {tok}")
+        self.assertEqual(ctx.exception.status_code, 401)
         self.assertEqual(main.list_agent_tokens(p=a)["agents"], [])
+
+    def test_unknown_agent_prefixed_token_is_rejected(self):
+        """Un token con prefijo de agente que NUNCA existió (revocado/desconocido)
+        también se rechaza: nunca debe crear una org maestra fantasma."""
+        with self.assertRaises(HTTPException) as ctx:
+            main.principal(
+                authorization=f"Bearer {main.AGENT_TOKEN_PREFIX}jamas-emitido-xyz")
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_manual_org_token_still_master(self):
+        """Compat hacia atrás: un token de ORG manual (sin el prefijo de agente)
+        sigue siendo maestro de su propia org, como siempre."""
+        p = main.principal(authorization="Bearer mi-token-manual-largo-1234")
+        self.assertTrue(p.is_master)
+        self.assertEqual(p.org_token, "mi-token-manual-largo-1234")
 
     # ── Auth-3: entitlement / freemium ──────────────────────────────────
     def test_new_account_gets_pro_trial(self):
