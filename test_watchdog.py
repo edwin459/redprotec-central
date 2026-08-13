@@ -289,6 +289,42 @@ class ComputeUptimeTest(unittest.TestCase):
         self.assertAlmostEqual(u["downtime_seconds"], 3600, delta=2)
 
 
+class ComputeIncidentsTest(unittest.TestCase):
+    def setUp(self):
+        self.now = main._now()
+        self.start = self.now - timedelta(days=30)
+
+    def test_pairs_down_up_with_timestamps(self):
+        d = self.now - timedelta(hours=3)
+        u = self.now - timedelta(hours=2)
+        incs = main.compute_incidents(
+            [{"event": "down", "at": d}, {"event": "up", "at": u}],
+            self.start, self.now)
+        self.assertEqual(len(incs), 1)
+        self.assertEqual(incs[0]["down_at"], d)
+        self.assertEqual(incs[0]["up_at"], u)
+        self.assertFalse(incs[0]["ongoing"])
+        self.assertEqual(incs[0]["duration_seconds"], 3600)
+
+    def test_ongoing_incident_has_no_up(self):
+        d = self.now - timedelta(minutes=30)
+        incs = main.compute_incidents([{"event": "down", "at": d}],
+                                      self.start, self.now)
+        self.assertEqual(len(incs), 1)
+        self.assertIsNone(incs[0]["up_at"])
+        self.assertTrue(incs[0]["ongoing"])
+
+    def test_most_recent_first(self):
+        d1 = self.now - timedelta(hours=10); u1 = self.now - timedelta(hours=9)
+        d2 = self.now - timedelta(hours=2); u2 = self.now - timedelta(hours=1)
+        incs = main.compute_incidents(
+            [{"event": "down", "at": d1}, {"event": "up", "at": u1},
+             {"event": "down", "at": d2}, {"event": "up", "at": u2}],
+            self.start, self.now)
+        self.assertEqual(incs[0]["down_at"], d2)  # más reciente primero
+        self.assertEqual(incs[1]["down_at"], d1)
+
+
 class SlaEndpointTest(unittest.TestCase):
     def setUp(self):
         main._STORE.clear()

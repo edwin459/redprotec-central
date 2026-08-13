@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.11", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.12", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -496,6 +496,31 @@ def compute_uptime(events: list[dict], start: datetime, now: datetime) -> dict:
         "incidents": incidents,
         "mttr_seconds": round(sum(resolved) / len(resolved)) if resolved else 0,
     }
+
+
+def compute_incidents(events: list[dict], start: datetime, now: datetime) -> list[dict]:
+    """PURA: empareja cada down→up de UNA sede en [start, now] como un INCIDENTE
+    con marcas de tiempo (cayó / volvió / duración). El que sigue caído queda
+    `ongoing`. Ordenados del más reciente al más antiguo — para el informe por
+    sede, como lo pediría un arquitecto de redes (cada caída, no solo el total)."""
+    evs = sorted(events, key=lambda e: e["at"])
+    out: list[dict] = []
+    down_at: datetime | None = None
+    if evs and evs[0]["event"] == "up":
+        down_at = start  # venía caída desde antes de la ventana
+    for e in evs:
+        if e["event"] == "down":
+            if down_at is None:
+                down_at = e["at"]
+        elif e["event"] == "up" and down_at is not None:
+            out.append({"down_at": down_at, "up_at": e["at"], "ongoing": False,
+                        "duration_seconds": int((e["at"] - down_at).total_seconds())})
+            down_at = None
+    if down_at is not None:
+        out.append({"down_at": down_at, "up_at": None, "ongoing": True,
+                    "duration_seconds": int((now - down_at).total_seconds())})
+    out.sort(key=lambda i: i["down_at"], reverse=True)
+    return out
 
 
 def compose_site_escalation_message(
@@ -1586,8 +1611,17 @@ def sla(days: int = 30, p: Principal = Depends(principal)) -> dict:
     for site_id, rec in store.list_sites(p.org_token):
         if not p.sees_site(site_id):
             continue
-        u = compute_uptime(by_site.get(site_id, []), start, now)
-        out.append({"site_id": site_id, "site_name": rec["site_name"], **u})
+        evs = by_site.get(site_id, [])
+        u = compute_uptime(evs, start, now)
+        incs = compute_incidents(evs, start, now)[:200]
+        detail = [{
+            "down_at": i["down_at"].isoformat(),
+            "up_at": i["up_at"].isoformat() if i["up_at"] else None,
+            "duration_seconds": i["duration_seconds"],
+            "ongoing": i["ongoing"],
+        } for i in incs]
+        out.append({"site_id": site_id, "site_name": rec["site_name"],
+                    **u, "incidents_detail": detail})
     out.sort(key=lambda x: (x["uptime_pct"], x["site_name"].lower()))  # peor primero
     if out:
         overall = round(sum(x["uptime_pct"] for x in out) / len(out), 3)
