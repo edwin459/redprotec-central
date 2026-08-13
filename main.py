@@ -35,7 +35,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from auth import verify_supabase_jwt
+from auth import supabase_auth_configured, verify_supabase_jwt
 from ratelimit import FailureLockout, SlidingWindow, client_ip, int_env
 from store import create_store
 
@@ -91,7 +91,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.18", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.19", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -988,6 +988,16 @@ def principal(authorization: str | None = Header(default=None)) -> Principal:
             str(claims["sub"]), "owner", ["*"], True,
             claims.get("email") or claims.get("name") or "Cuenta",
         )
+    # Endurecimiento (P0.2): un token con forma de JWT (2 puntos) que NO verifica,
+    # teniendo Supabase configurado, se RECHAZA con 401 — es una sesión inválida,
+    # vencida o de firma no aceptada (p. ej. HS256 con AUTH_REQUIRE_ASYMMETRIC).
+    # Antes caía al modelo opaco y se volvía una org vacía fantasma (200 silencioso
+    # en vez de «vuelve a iniciar sesión»). Los tokens de org OPACOS (sin puntos)
+    # siguen funcionando como siempre para despliegues sin Supabase.
+    if token.count(".") == 2 and supabase_auth_configured():
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión inválida o vencida. Vuelve a iniciar sesión.")
     # Auth-2: token de AGENTE (lo emite el relay al vincular una sede a una
     # cuenta). Resuelve al `org_token` de la cuenta → el agente reporta como
     # dueño de ESA organización, sin exponer credenciales adivinables.

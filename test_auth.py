@@ -11,6 +11,7 @@ import time
 import unittest
 
 import jwt
+from fastapi import HTTPException
 
 TEST_SECRET = "test-supabase-jwt-secret-0123456789abcdef"
 
@@ -116,11 +117,24 @@ class SupabaseAuthTests(unittest.TestCase):
         self.assertEqual(self.main.list_sites(p=pb)["sites"], [])
 
     def test_opaque_token_still_works_backward_compat(self):
-        # Con Supabase configurado, un token OPACO (no JWT) sigue siendo dueño de
-        # su propia org keyed por el token (modelo de siempre).
+        # Con Supabase configurado, un token OPACO (no JWT, SIN puntos) sigue
+        # siendo dueño de su propia org keyed por el token (modelo de siempre).
         p = self.main.principal(authorization="Bearer org-clasico-abcdef123")
         self.assertTrue(p.is_master)
         self.assertEqual(p.org_token, "org-clasico-abcdef123")
+
+    def test_invalid_jwt_shaped_token_rejected_when_configured(self):
+        """Un token con forma de JWT (2 puntos) que NO verifica —mala firma o
+        vencido— se rechaza con 401 (sesión inválida), NO se vuelve una org opaca
+        fantasma. Es lo que le da dientes al modo estricto."""
+        bad_sig = _mint("user-A", secret="otro-secreto-que-no-cuadra-1234567")
+        with self.assertRaises(HTTPException) as ctx:
+            self.main.principal(authorization=f"Bearer {bad_sig}")
+        self.assertEqual(ctx.exception.status_code, 401)
+        expired = _mint("user-A", exp_delta=-10)
+        with self.assertRaises(HTTPException) as ctx:
+            self.main.principal(authorization=f"Bearer {expired}")
+        self.assertEqual(ctx.exception.status_code, 401)
 
 
 if __name__ == "__main__":
