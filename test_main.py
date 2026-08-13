@@ -313,6 +313,33 @@ class CloudRbacTests(unittest.TestCase):
         # No se filtra inventario de equipos de ningún cliente.
         self.assertNotIn("devices_list", out["fleet"][0])
 
+    def test_admin_purge_org_removes_ghost(self):
+        """Purga de super-admin: elimina una org FANTASMA (sus sedes) del panel —
+        p. ej. la que crea un token de agente revocado que reportó por su cuenta."""
+        _seed_site("rp_agent_fantasma-xyz", "casa", "Casa")
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            out = main.admin_purge_org(
+                "rp_agent_fantasma-xyz",
+                _=main.require_admin("Bearer admin-secreto-test"))
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["sites_removed"], 1)
+            fleet = main.admin_fleet(
+                _=main.require_admin("Bearer admin-secreto-test"))
+        finally:
+            main.ADMIN_TOKEN = ""
+        self.assertNotIn(
+            "rp_agent_fantasma-xyz", [f["org"] for f in fleet["fleet"]])
+
+    def test_admin_purge_org_requires_admin(self):
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            with self.assertRaises(HTTPException) as ctx:
+                main.admin_purge_org("cualquier-org", _=main.require_admin(None))
+        finally:
+            main.ADMIN_TOKEN = ""
+        self.assertEqual(ctx.exception.status_code, 403)
+
     def test_download_info_not_configured_by_default(self):
         main.AGENT_DOWNLOAD_URL = ""
         info = main.download_info()

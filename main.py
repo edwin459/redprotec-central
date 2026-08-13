@@ -2095,6 +2095,28 @@ def admin_partner_flag(body: PartnerFlagIn, _: bool = Depends(require_admin)) ->
     return {"ok": True, "org": body.org, "is_partner": body.is_partner}
 
 
+@app.delete("/v1/admin/org/{org_token}")
+def admin_purge_org(org_token: str, _: bool = Depends(require_admin)) -> dict:
+    """**Limpieza (super-admin):** purga TODOS los datos de una org del panel — sus
+    sedes y las claves asociadas (config, vigilancia, socio). Sirve para eliminar
+    orgs FANTASMA: p. ej. un token de agente revocado que estuvo reportando como su
+    propia org. No afecta cuentas reales salvo que se les pase su org a propósito."""
+    removed = 0
+    for site_id, _rec in list(store.list_sites(org_token)):
+        if store.remove_site(org_token, site_id):
+            removed += 1
+    # Claves asociadas (best-effort): que no quede rastro del fantasma.
+    for key in (f"managed_by::{org_token}", f"is_partner::{org_token}",
+                f"partner_clients::{org_token}"):
+        store.kv_set(key, "")
+    try:
+        store.set_alert_topic(org_token, None)
+    except Exception:
+        pass
+    _SITE_WATCH.pop(org_token, None)
+    return {"ok": True, "org": org_token, "sites_removed": removed}
+
+
 @app.post("/v1/partner/clients")
 def partner_create_client(
     body: PartnerClientIn, p: Principal = Depends(require_partner_account)
