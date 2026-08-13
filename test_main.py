@@ -576,6 +576,20 @@ class PartnerAccountTests(unittest.TestCase):
         self.assertIn(c1, seen1)
         self.assertNotIn(c2, seen1)  # no ve los clientes de otro socio
 
+    def test_remove_client_revokes_token_and_cleans(self):
+        self._promote(self.partner)
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        out = main.partner_create_client(main.PartnerClientIn(name="X"), p=p)
+        client_org, token = out["client_org"], out["agent_token"]
+        p_agent = main.principal(authorization=f"Bearer {token}")
+        main.heartbeat(main.Heartbeat(site_id="s1", site_name="S",
+                                      remote_admin=True), p=p_agent)
+        self.assertEqual(len(main.partner_clients(p=p)["fleet"]), 1)
+        # eliminar el cliente
+        main.partner_remove_client(client_org, p=p)
+        self.assertEqual(main.partner_clients(p=p)["fleet"], [])  # fuera de cartera
+        self.assertIsNone(main.store.resolve_agent_token(token))  # token revocado
+
 
 class AuditLogTests(unittest.TestCase):
     """Bitácora de auditoría: los comandos remotos quedan registrados por org."""

@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.14", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.15", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -2095,6 +2095,31 @@ def partner_clients(p: Principal = Depends(require_partner_account)) -> dict:
     for f in agg["fleet"]:
         f["client_name"] = names.get(f["org"], "")
     return {**agg, "partner_name": p.name or "Socio"}
+
+
+@app.delete("/v1/partner/clients/{client_org}")
+def partner_remove_client(
+    client_org: str, p: Principal = Depends(require_partner_account)
+) -> dict:
+    """El socio deja de gestionar un cliente: lo quita de su cartera, REVOCA los
+    tokens de agente del cliente (deja de reportar) y borra sus sedes del panel.
+    Solo puede eliminar clientes que él mismo provisionó."""
+    items = _partner_clients(p.org_token)
+    if not any(it.get("org") == client_org for it in items):
+        raise HTTPException(status_code=404, detail="Cliente no está en tu cartera")
+    _set_partner_clients(
+        p.org_token, [it for it in items if it.get("org") != client_org])
+    # Revoca los tokens de agente del cliente → sus agentes dejan de reportar.
+    for t in store.list_agent_tokens(client_org):
+        tok = t.get("token")
+        if tok:
+            store.revoke_agent_token(client_org, tok)
+    # Limpia sus sedes del panel + el estado del watchdog de esa org.
+    for site_id, _rec in store.list_sites(client_org):
+        store.remove_site(client_org, site_id)
+    with _WATCH_LOCK:
+        _SITE_WATCH.pop(client_org, None)
+    return {"ok": True}
 
 
 @app.put("/v1/admin/entitlement")
