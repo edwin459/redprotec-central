@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.12", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.13", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -1894,6 +1894,10 @@ def get_entitlement(p: Principal = Depends(principal)) -> dict:
     y el agente con el MISMO contrato. A una cuenta nueva le inicia la prueba Pro."""
     ent = _compute_entitlement(p.org_token, _now())
     ent["org"] = p.org_token  # el móvil lo muestra para soporte / admin manual
+    # MSP: ¿esta cuenta es un SOCIO? La app le muestra la Consola de Socio SOLO si
+    # esto es true (a los usuarios normales nunca les aparece).
+    ent["is_partner"] = _is_partner(p.org_token)
+    ent["partner_clients"] = len(_partner_clients(p.org_token)) if ent["is_partner"] else 0
     return ent
 
 
@@ -1923,24 +1927,42 @@ def require_admin(authorization: str | None = Header(default=None)) -> bool:
 
 
 # ─────────────────── MSP: Consola de socio (multi-cliente) ───────────────────
-class PartnerIn(BaseModel):
-    """Alta/edición de un SOCIO (MSP) y sus organizaciones-cliente. La define el
-    super-admin (dueño del negocio) al onboardear a un proveedor de TI."""
-    token: str = Field(min_length=8, max_length=200)
-    name: str = Field(default="", max_length=120)
-    clients: list[str] = Field(default_factory=list)  # org_tokens de clientes
+# Modelo PROFESIONAL basado en CUENTA (no en tokens demo): un socio (MSP) es una
+# cuenta normal MARCADA como socio por el dueño. Al iniciar sesión, la app detecta
+# `is_partner` y le muestra su consola automáticamente. El socio PROVISIONA a sus
+# clientes: crea una organización-cliente aislada y obtiene un token de agente
+# para instalar en la sede del cliente. Cada cliente reporta a SU propia org.
+def _is_partner(org: str) -> bool:
+    return store.kv_get(f"is_partner::{org}") == "1"
 
 
-def require_partner(authorization: str | None = Header(default=None)) -> dict:
-    """Autentica a un SOCIO por su token (guardado en KV). Devuelve su config
-    ``{token, name, clients}``. El socio ve SOLO sus organizaciones-cliente."""
-    token = require_org_token(authorization)
-    raw = store.kv_get(f"partner::{token}")
-    if not raw:
-        raise HTTPException(status_code=403, detail="Token de socio no válido")
-    data = json.loads(raw)
-    data["token"] = token
-    return data
+def _partner_clients(org: str) -> list[dict]:
+    """[{org, name}] de las organizaciones-cliente que gestiona el socio."""
+    raw = store.kv_get(f"partner_clients::{org}")
+    return json.loads(raw) if raw else []
+
+
+def _set_partner_clients(org: str, items: list[dict]) -> None:
+    store.kv_set(f"partner_clients::{org}", json.dumps(items))
+
+
+def require_partner_account(p: Principal = Depends(principal)) -> Principal:
+    """La cuenta que llama debe estar marcada como SOCIO (MSP). Sin token que pegar:
+    la identidad es su sesión."""
+    if not _is_partner(p.org_token):
+        raise HTTPException(status_code=403,
+                            detail="Tu cuenta no es una cuenta de socio (MSP)")
+    return p
+
+
+class PartnerClientIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class PartnerFlagIn(BaseModel):
+    """El dueño promueve/quita a una cuenta como socio (MSP)."""
+    org: str = Field(min_length=1, max_length=200)
+    is_partner: bool = True
 
 
 def _plan_readonly(org: str, now: datetime) -> str:
@@ -2035,23 +2057,43 @@ def admin_fleet(_: bool = Depends(require_admin)) -> dict:
     return _aggregate_fleet(_now())
 
 
-@app.post("/v1/admin/partners")
-def admin_set_partner(body: PartnerIn, _: bool = Depends(require_admin)) -> dict:
-    """**MSP:** el super-admin da de alta/edita un SOCIO y le asigna las
-    organizaciones-cliente que gestiona. Idempotente (reemplaza la lista)."""
-    clients = list(dict.fromkeys([c.strip() for c in body.clients if c.strip()]))
-    store.kv_set(f"partner::{body.token}",
-                 json.dumps({"name": body.name, "clients": clients}))
-    return {"ok": True, "clients": len(clients)}
+@app.post("/v1/admin/partner-flag")
+def admin_partner_flag(body: PartnerFlagIn, _: bool = Depends(require_admin)) -> dict:
+    """**MSP:** el dueño PROMUEVE (o quita) una cuenta como socio. `org` es el
+    org_token de la cuenta (lo ve la cuenta en 'Mi cuenta' / lo entrega el panel
+    de flota). Sin tokens demo: la identidad del socio es su propia sesión."""
+    store.kv_set(f"is_partner::{body.org}", "1" if body.is_partner else "0")
+    return {"ok": True, "org": body.org, "is_partner": body.is_partner}
+
+
+@app.post("/v1/partner/clients")
+def partner_create_client(
+    body: PartnerClientIn, p: Principal = Depends(require_partner_account)
+) -> dict:
+    """El socio PROVISIONA un cliente: crea una organización-cliente AISLADA y
+    devuelve un **token de agente** para instalar en la sede de ese cliente. Cada
+    cliente reporta a su propia org → datos separados."""
+    client_org = "client_" + secrets.token_urlsafe(16)
+    agent_token = "rp_agent_" + secrets.token_urlsafe(24)
+    store.create_agent_token(client_org, agent_token, body.name.strip(), _now())
+    items = _partner_clients(p.org_token)
+    items.append({"org": client_org, "name": body.name.strip()})
+    _set_partner_clients(p.org_token, items)
+    return {"ok": True, "client_org": client_org,
+            "agent_token": agent_token, "name": body.name.strip()}
 
 
 @app.get("/v1/partner/clients")
-def partner_clients(partner: dict = Depends(require_partner)) -> dict:
+def partner_clients(p: Principal = Depends(require_partner_account)) -> dict:
     """**Consola de socio (MSP):** salud agregada de las organizaciones-cliente
-    del socio, en un solo panel. Reutiliza la agregación de flota, acotada al
-    alcance del socio. NO expone inventario/MACs de ningún cliente."""
-    agg = _aggregate_fleet(_now(), only_orgs=set(partner.get("clients") or []))
-    return {**agg, "partner_name": partner.get("name") or "Socio"}
+    del socio (las que él provisionó), en un solo panel. Reutiliza la agregación
+    de flota. NO expone inventario/MACs de ningún cliente."""
+    items = _partner_clients(p.org_token)
+    names = {it.get("org"): it.get("name", "") for it in items}
+    agg = _aggregate_fleet(_now(), only_orgs=set(names.keys()))
+    for f in agg["fleet"]:
+        f["client_name"] = names.get(f["org"], "")
+    return {**agg, "partner_name": p.name or "Socio"}
 
 
 @app.put("/v1/admin/entitlement")

@@ -513,57 +513,68 @@ class ComplianceAndAvailabilityTests(unittest.TestCase):
         self.assertEqual(out["sites"][0]["site_id"], "b")
 
 
-class PartnerConsoleTests(unittest.TestCase):
-    """Modo MSP (Consola de socio): un socio ve SOLO sus organizaciones-cliente."""
+class PartnerAccountTests(unittest.TestCase):
+    """Modo MSP por CUENTA (sin tokens demo): el dueño promueve una cuenta a socio;
+    el socio provisiona clientes (org aislada + token de agente) y ve solo los suyos."""
 
     def setUp(self):
         main._STORE.clear()
-        if hasattr(main.store, "_kv"):
-            main.store._kv.clear()
+        for attr in ("_kv", "_agent_tokens"):
+            if hasattr(main.store, attr):
+                getattr(main.store, attr).clear()
         self.admin = "admin-secret-partner-test"
         main.ADMIN_TOKEN = self.admin
+        self.partner = "partner-account-org-1"
 
     def tearDown(self):
         main.ADMIN_TOKEN = ""
         main._STORE.clear()
-        if hasattr(main.store, "_kv"):
-            main.store._kv.clear()
+        for attr in ("_kv", "_agent_tokens"):
+            if hasattr(main.store, attr):
+                getattr(main.store, attr).clear()
 
-    def _seed(self, org, site_id):
-        main._STORE.setdefault(org, {})[site_id] = {
-            "site_name": site_id,
-            "summary": main.SiteSummary(devices_total=3).model_dump(),
-            "devices": [], "remote_admin": False, "updated_at": main._now()}
-
-    def test_partner_sees_only_assigned_clients(self):
-        self._seed("client-A", "s1")
-        self._seed("client-B", "s2")
-        self._seed("other-C", "s3")
-        main.admin_set_partner(
-            main.PartnerIn(token="partner-tok-123456", name="MSP Uno",
-                           clients=["client-A", "client-B"]),
+    def _promote(self, org):
+        main.admin_partner_flag(
+            main.PartnerFlagIn(org=org, is_partner=True),
             _=main.require_admin(f"Bearer {self.admin}"))
-        out = main.partner_clients(
-            partner=main.require_partner("Bearer partner-tok-123456"))
-        orgs = {f["org"] for f in out["fleet"]}
-        self.assertEqual(orgs, {"client-A", "client-B"})  # NO ve other-C
-        self.assertEqual(out["partner_name"], "MSP Uno")
-        self.assertEqual(out["totals"]["accounts"], 2)
 
-    def test_unknown_partner_token_403(self):
+    def test_normal_account_is_not_partner(self):
         with self.assertRaises(HTTPException) as ctx:
-            main.require_partner("Bearer nope-not-a-partner-xxxx")
+            main.require_partner_account(p=main._resolve_principal(self.partner))
         self.assertEqual(ctx.exception.status_code, 403)
+        ent = main.get_entitlement(p=main._resolve_principal(self.partner))
+        self.assertFalse(ent["is_partner"])  # a un usuario normal no le aparece
 
-    def test_assigned_client_without_sites_is_listed_offline(self):
-        main.admin_set_partner(
-            main.PartnerIn(token="partner-tok-abcdef", name="MSP",
-                           clients=["client-empty"]),
-            _=main.require_admin(f"Bearer {self.admin}"))
-        out = main.partner_clients(
-            partner=main.require_partner("Bearer partner-tok-abcdef"))
-        self.assertEqual({f["org"] for f in out["fleet"]}, {"client-empty"})
-        self.assertFalse(out["fleet"][0]["online"])  # sin sedes → offline, no invisible
+    def test_promote_provision_and_isolated_client(self):
+        self._promote(self.partner)
+        ent = main.get_entitlement(p=main._resolve_principal(self.partner))
+        self.assertTrue(ent["is_partner"])
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        out = main.partner_create_client(
+            main.PartnerClientIn(name="Panadería Sur"), p=p)
+        self.assertTrue(out["agent_token"].startswith("rp_agent_"))
+        client_org = out["client_org"]
+        # el token de agente resuelve a la org del CLIENTE (aislada)
+        self.assertEqual(main.store.resolve_agent_token(out["agent_token"]), client_org)
+        # una sede que reporta con ese token cae bajo la org del cliente
+        p_agent = main.principal(authorization=f"Bearer {out['agent_token']}")
+        main.heartbeat(main.Heartbeat(site_id="s1", site_name="Sucursal",
+                                      remote_admin=True), p=p_agent)
+        console = main.partner_clients(p=p)
+        by = {f["org"]: f for f in console["fleet"]}
+        self.assertIn(client_org, by)
+        self.assertEqual(by[client_org]["client_name"], "Panadería Sur")
+
+    def test_partner_only_sees_own_clients(self):
+        self._promote(self.partner)
+        self._promote("partner-2")
+        p1 = main.require_partner_account(p=main._resolve_principal(self.partner))
+        p2 = main.require_partner_account(p=main._resolve_principal("partner-2"))
+        c1 = main.partner_create_client(main.PartnerClientIn(name="A"), p=p1)["client_org"]
+        c2 = main.partner_create_client(main.PartnerClientIn(name="B"), p=p2)["client_org"]
+        seen1 = {f["org"] for f in main.partner_clients(p=p1)["fleet"]}
+        self.assertIn(c1, seen1)
+        self.assertNotIn(c2, seen1)  # no ve los clientes de otro socio
 
 
 class AuditLogTests(unittest.TestCase):
