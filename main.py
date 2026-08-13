@@ -91,7 +91,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.19", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.20", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -137,8 +137,9 @@ ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # orden vieja se ejecute cuando la sede vuelva días después).
 COMMAND_TTL_SECONDS = int(os.environ.get("COMMAND_TTL_SECONDS", "600"))
 # Auth-3 (freemium): días de prueba Pro al crear la cuenta. Un solo valor,
-# cambiable por entorno (ej. TRIAL_DAYS=3) sin tocar código.
-TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "5"))
+# cambiable por entorno (ej. TRIAL_DAYS=1) sin tocar código. Solo afecta a las
+# cuentas NUEVAS (las existentes conservan su `trial_ends_at` ya fijado).
+TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 # Token de super-admin (tú, el dueño del negocio) para marcar cuentas Pro/Free a
 # mano mientras no hay cobro automático. Vacío = el endpoint de admin queda cerrado.
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()

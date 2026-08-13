@@ -271,7 +271,9 @@ class CloudRbacTests(unittest.TestCase):
         self.assertEqual(ent["plan"], "trial")
         self.assertEqual(ent["effective"], "pro")
         self.assertTrue(ent["can_control"])
-        self.assertGreaterEqual(ent["trial_days_left"], 4)
+        # La prueba dura TRIAL_DAYS (política de negocio, configurable por entorno).
+        self.assertGreaterEqual(ent["trial_days_left"], main.TRIAL_DAYS - 1)
+        self.assertLessEqual(ent["trial_days_left"], main.TRIAL_DAYS)
 
     def test_command_allowed_during_trial(self):
         # self.org es nuevo → prueba Pro → puede comandar.
