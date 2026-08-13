@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.13", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.14", lifespan=lifespan)
 
 ONLINE_WINDOW_SECONDS = int(os.environ.get("ONLINE_WINDOW_SECONDS", "150"))
 # Comandos que el agente no recoge en este tiempo se descartan (evita que una
@@ -2029,6 +2029,7 @@ def _aggregate_fleet(now: datetime, only_orgs: set[str] | None = None) -> dict:
             "needs_attention": (not any_online) or o["criticals_down"] > 0 or o["alerts"] > 0,
             "last_seen": last.isoformat() if last else None,
             "seconds_since_seen": int((now - last).total_seconds()) if last else None,
+            "is_partner": _is_partner(org),  # ¿esta cuenta es socio? (para el botón)
         })
     fleet.sort(key=lambda f: (
         0 if not f["online"] else 1,
