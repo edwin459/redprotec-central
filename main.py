@@ -91,7 +91,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.20", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.21", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -2221,6 +2221,88 @@ def partner_remove_client(
     with _WATCH_LOCK:
         _SITE_WATCH.pop(client_org, None)
     return {"ok": True}
+
+
+# ── Drill-in del socio: dar soporte a la red de un cliente ──────────────────
+def _require_client_of_partner(p: Principal, client_org: str) -> str:
+    """El socio SOLO puede tocar redes de SUS clientes (los que lo vincularon).
+    Devuelve el nombre del cliente si es válido; 403 si no está en su cartera."""
+    for it in _partner_clients(p.org_token):
+        if it.get("org") == client_org:
+            return it.get("name") or "Cliente"
+    raise HTTPException(status_code=403, detail="Ese cliente no está en tu cartera.")
+
+
+@app.get("/v1/partner/clients/{client_org}/sites")
+def partner_client_sites(
+    client_org: str, p: Principal = Depends(require_partner_account)
+) -> dict:
+    """**Soporte MSP:** las sedes de un CLIENTE que gestiona el socio. Ve el mismo
+    resumen que el dueño del cliente (equipos en línea, alertas, críticos) para
+    diagnosticar. El inventario detallado va en el endpoint de detalle."""
+    name = _require_client_of_partner(p, client_org)
+    now = _now()
+    out = [_site_out(sid, rec, now) for sid, rec in store.list_sites(client_org)]
+    out.sort(key=lambda s: (
+        0 if not s["online"] else 1,
+        0 if s["summary"]["criticals_down"] > 0 else 1,
+        0 if s["summary"]["alerts"] > 0 else 1,
+        s["site_name"].lower()))
+    return {"client_org": client_org, "client_name": name, "sites": out}
+
+
+@app.get("/v1/partner/clients/{client_org}/sites/{site_id}")
+def partner_client_site_detail(
+    client_org: str, site_id: str,
+    p: Principal = Depends(require_partner_account)
+) -> dict:
+    """Detalle de una sede del cliente con los **dispositivos conectados** (si el
+    cliente comparte inventario) y si permite administración remota."""
+    _require_client_of_partner(p, client_org)
+    now = _now()
+    rec = store.get_site(client_org, site_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Sede no encontrada")
+    base = _site_out(site_id, rec, now)
+    devices = rec.get("devices") or []
+    base["devices"] = devices
+    base["full_inventory"] = bool(devices)
+    base["can_command"] = bool(rec.get("remote_admin"))
+    return base
+
+
+@app.post("/v1/partner/clients/{client_org}/sites/{site_id}/commands")
+def partner_client_command(
+    client_org: str, site_id: str, cmd: CommandIn,
+    p: Principal = Depends(require_partner_account)
+) -> dict:
+    """El socio ejecuta un comando (bloquear/confiar/…) en la red del cliente para
+    dar soporte. Queda **AUDITADO en la bitácora del CLIENTE** (transparencia: el
+    cliente ve que su proveedor actuó, cuándo y sobre qué). El agente del cliente
+    es el enforcement final (aplica su propio plan/permiso)."""
+    _require_client_of_partner(p, client_org)
+    now = _now()
+    rec = store.get_site(client_org, site_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Sede no encontrada")
+    if not rec.get("remote_admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Esta sede del cliente no permite administración remota.")
+    command = {
+        "id": uuid.uuid4().hex[:12],
+        "action": cmd.action,
+        "mac": cmd.mac,
+        "value": cmd.value,
+        "created_at": now,
+    }
+    store.enqueue_command(client_org, site_id, command)
+    store.record_audit(
+        client_org, f"Socio: {p.name or 'Proveedor'}",
+        f"command:{cmd.action}", f"{site_id}/{cmd.mac}",
+        "El proveedor ejecutó «" + cmd.action + "»"
+        + (f" = {cmd.value}" if cmd.value else ""), now)
+    return {"ok": True, "command_id": command["id"]}
 
 
 @app.post("/v1/partner/invite")

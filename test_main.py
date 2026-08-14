@@ -664,6 +664,45 @@ class PartnerAccountTests(unittest.TestCase):
         main.partner_leave(p=client)
         self.assertEqual(main.partner_clients(p=p)["fleet"], [])
 
+    def test_partner_drill_in_sites_devices_and_command(self):
+        """El socio entra a la red del cliente: ve sedes, dispositivos y ejecuta
+        soporte (bloquear), que queda AUDITADO en la bitácora del cliente."""
+        self._promote(self.partner)
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        out = main.partner_create_client(
+            main.PartnerClientIn(name="Cliente X"), p=p)
+        client_org = out["client_org"]
+        _seed_site(client_org, "casa", "Casa", remote_admin=True,
+                   devices=[{"mac": "AA:BB", "name": "TV", "online": True}])
+        # Ve las sedes del cliente.
+        sites = main.partner_client_sites(client_org, p=p)["sites"]
+        self.assertEqual([s["site_id"] for s in sites], ["casa"])
+        # Detalle con los dispositivos conectados + puede comandar.
+        detail = main.partner_client_site_detail(client_org, "casa", p=p)
+        self.assertEqual(detail["devices"][0]["mac"], "AA:BB")
+        self.assertTrue(detail["can_command"])
+        # Comando de soporte → auditado en la bitácora del CLIENTE.
+        res = main.partner_client_command(
+            client_org, "casa",
+            main.CommandIn(action="block", mac="AA:BB"), p=p)
+        self.assertTrue(res["ok"])
+        audit = main.store.list_audit(client_org, 10)
+        self.assertTrue(any("Socio" in a.get("actor", "") for a in audit))
+
+    def test_partner_cannot_touch_foreign_client(self):
+        """El socio NO puede ver ni comandar una org que no está en su cartera."""
+        self._promote(self.partner)
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        _seed_site("org-ajena", "s1", "Ajena", remote_admin=True)
+        with self.assertRaises(HTTPException) as ctx:
+            main.partner_client_sites("org-ajena", p=p)
+        self.assertEqual(ctx.exception.status_code, 403)
+        with self.assertRaises(HTTPException) as ctx:
+            main.partner_client_command(
+                "org-ajena", "s1",
+                main.CommandIn(action="block", mac="AA:BB"), p=p)
+        self.assertEqual(ctx.exception.status_code, 403)
+
 
 class AuditLogTests(unittest.TestCase):
     """Bitácora de auditoría: los comandos remotos quedan registrados por org."""
