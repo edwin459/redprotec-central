@@ -91,7 +91,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.23", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.24", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -912,6 +912,9 @@ class DeviceEntry(BaseModel):
     # para el mapa "Centro de mando" (consumo por equipo) y agrupación por área.
     # Sin estos campos, model_dump() los descartaría y nunca llegarían a la app.
     bytes_per_sec: float | None = None
+    # true = el consumo es una ESTIMACIÓN por categoría (no medición exacta); la
+    # app lo etiqueta con «~». Sin este campo, model_dump() lo descartaría.
+    consumption_estimated: bool = False
     area: str | None = None
 
 
