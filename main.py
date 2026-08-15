@@ -91,7 +91,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.22", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.23", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -1396,6 +1396,44 @@ def site_detail(site_id: str, p: Principal = Depends(principal)) -> dict:
         p.can("block") or p.can("trust") or p.can("rename")
     )
     return base
+
+
+@app.get("/v1/sites/{site_id}/history")
+def site_history(site_id: str, p: Principal = Depends(principal)) -> dict:
+    """Historial de snapshots de UNA sede propia (para comparar dos momentos).
+    Mismo alcance que el detalle: solo si la sede está en tu alcance."""
+    if not p.sees_site(site_id):
+        raise HTTPException(status_code=403, detail="Esta sede está fuera de tu alcance")
+    hist = _load_site_history(p.org_token, site_id)
+    points = [
+        {
+            "ts": s.get("ts"),
+            "online": s.get("online", 0),
+            "total": s.get("total", 0),
+            "alerts": s.get("alerts", 0),
+            "criticals_down": s.get("criticals_down", 0),
+        }
+        for s in hist
+    ]
+    return {"site_id": site_id, "points": points}
+
+
+@app.get("/v1/sites/{site_id}/compare")
+def site_compare(
+    site_id: str, a_ts: str, b_ts: str, p: Principal = Depends(principal)
+) -> dict:
+    """Compara dos snapshots de una sede propia (por su `ts`): deltas de conteo +
+    qué equipos cambiaron. Mismo alcance que el detalle."""
+    if not p.sees_site(site_id):
+        raise HTTPException(status_code=403, detail="Esta sede está fuera de tu alcance")
+    hist = _load_site_history(p.org_token, site_id)
+    by_ts = {s.get("ts"): s for s in hist}
+    a, b = by_ts.get(a_ts), by_ts.get(b_ts)
+    if a is None or b is None:
+        raise HTTPException(status_code=404, detail="Snapshot no encontrado")
+    if a.get("ts", "") > b.get("ts", ""):
+        a, b = b, a
+    return _compare_snapshots(a, b)
 
 
 @app.delete("/v1/sites/{site_id}")

@@ -37,6 +37,32 @@ class CloudRbacTests(unittest.TestCase):
         _seed_site(self.org, "bogota", "Bogotá")
         _seed_site(self.org, "medellin", "Medellín")
 
+    def test_owner_site_history_and_compare(self):
+        """El dueño compara dos momentos de SU propia sede (mismo alcance que el
+        detalle). Historial guardado en el KV por snapshot."""
+        if hasattr(main.store, "_kv"):
+            main.store._kv.clear()
+        p = main.principal(authorization=_bearer(self.org))
+        t0 = main._now()
+        main._record_site_snapshot(
+            self.org, "bogota",
+            {"devices_online": 2, "devices_total": 2, "alerts": 0,
+             "criticals_down": 0},
+            [{"mac": "AA", "name": "A", "online": True, "trust": "trusted"}], t0)
+        t1 = t0 + timedelta(seconds=600)
+        main._record_site_snapshot(
+            self.org, "bogota",
+            {"devices_online": 1, "devices_total": 2, "alerts": 1,
+             "criticals_down": 0},
+            [{"mac": "BB", "name": "B", "online": True, "trust": "unknown"}], t1)
+        hist = main.site_history("bogota", p=p)["points"]
+        self.assertEqual(len(hist), 2)
+        cmp = main.site_compare(
+            "bogota", a_ts=t0.isoformat(), b_ts=t1.isoformat(), p=p)
+        self.assertEqual(cmp["delta"]["alerts"], 1)
+        self.assertIn("BB", {d["mac"] for d in cmp["devices"]["new"]})
+        self.assertIn("AA", {d["mac"] for d in cmp["devices"]["gone"]})
+
     # ── Resolución de principal ─────────────────────────────────────────
     def test_unknown_token_is_master_root(self):
         p = main._resolve_principal(self.org)
