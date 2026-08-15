@@ -91,7 +91,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.21", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.22", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -1041,6 +1041,118 @@ def _site_out(site_id: str, rec: dict, now: datetime) -> dict:
     }
 
 
+# ── Historial de sede (comparar dos momentos) ───────────────────────────────
+# Guardamos snapshots compactos por sede en el KV, con límite y throttle para
+# acotar el almacenamiento. Sirve para el "comparar antes vs ahora" del socio.
+SITE_HISTORY_MAX = 60           # snapshots por sede (los más recientes)
+SITE_HISTORY_MIN_GAP_SECONDS = 300   # no guardar más de 1 cada 5 min
+SITE_HISTORY_DEVICE_CAP = 250   # equipos por snapshot (acota tamaño)
+
+
+def _site_history_key(org: str, site_id: str) -> str:
+    return f"sitehist::{org}::{site_id}"
+
+
+def _load_site_history(org: str, site_id: str) -> list[dict]:
+    raw = store.kv_get(_site_history_key(org, site_id))
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _record_site_snapshot(
+    org: str, site_id: str, summary: dict, devices: list | None,
+    now: datetime,
+) -> None:
+    """Anexa un snapshot compacto de la sede (throttled + capado). Nunca rompe el
+    heartbeat: si algo falla, se ignora."""
+    try:
+        hist = _load_site_history(org, site_id)
+        if hist:
+            try:
+                last = datetime.fromisoformat(hist[-1]["ts"])
+                if (now - last).total_seconds() < SITE_HISTORY_MIN_GAP_SECONDS:
+                    return
+            except (ValueError, KeyError, TypeError):
+                pass
+        snap = {
+            "ts": now.isoformat(),
+            "online": int(summary.get("devices_online", 0)),
+            "total": int(summary.get("devices_total", 0)),
+            "alerts": int(summary.get("alerts", 0)),
+            "criticals_down": int(summary.get("criticals_down", 0)),
+            "devices": [
+                {
+                    "mac": (d.get("mac") or "").upper(),
+                    "name": d.get("name") or "",
+                    "online": bool(d.get("online")),
+                    "trust": d.get("trust") or "unknown",
+                    "is_critical": bool(d.get("is_critical")),
+                }
+                for d in (devices or [])[:SITE_HISTORY_DEVICE_CAP]
+                if d.get("mac")
+            ],
+        }
+        hist.append(snap)
+        if len(hist) > SITE_HISTORY_MAX:
+            hist = hist[-SITE_HISTORY_MAX:]
+        store.kv_set(_site_history_key(org, site_id), json.dumps(hist))
+    except Exception:  # noqa: BLE001 — el historial nunca debe tumbar el latido
+        pass
+
+
+def _compare_snapshots(a: dict, b: dict) -> dict:
+    """Diferencia entre dos snapshots: cambios de conteo y de equipos (nuevos,
+    ausentes, recién bloqueados/desbloqueados, caídos/recuperados)."""
+    da = {d["mac"]: d for d in a.get("devices", []) if d.get("mac")}
+    db = {d["mac"]: d for d in b.get("devices", []) if d.get("mac")}
+
+    def _label(d: dict) -> dict:
+        return {"mac": d["mac"], "name": d.get("name") or d["mac"]}
+
+    new = [_label(db[m]) for m in db if m not in da]
+    gone = [_label(da[m]) for m in da if m not in db]
+    newly_blocked, newly_unblocked = [], []
+    went_offline, came_online = [], []
+    for m in da.keys() & db.keys():
+        x, y = da[m], db[m]
+        if x.get("trust") != "blocked" and y.get("trust") == "blocked":
+            newly_blocked.append(_label(y))
+        if x.get("trust") == "blocked" and y.get("trust") != "blocked":
+            newly_unblocked.append(_label(y))
+        if x.get("online") and not y.get("online"):
+            went_offline.append(_label(y))
+        if not x.get("online") and y.get("online"):
+            came_online.append(_label(y))
+
+    def _counts(s: dict) -> dict:
+        return {
+            "online": s.get("online", 0),
+            "total": s.get("total", 0),
+            "alerts": s.get("alerts", 0),
+            "criticals_down": s.get("criticals_down", 0),
+        }
+
+    ca, cb = _counts(a), _counts(b)
+    return {
+        "a": {"ts": a.get("ts"), **ca},
+        "b": {"ts": b.get("ts"), **cb},
+        "delta": {k: cb[k] - ca[k] for k in ca},
+        "devices": {
+            "new": new,
+            "gone": gone,
+            "newly_blocked": newly_blocked,
+            "newly_unblocked": newly_unblocked,
+            "went_offline": went_offline,
+            "came_online": came_online,
+        },
+    }
+
+
 # ─────────────────────────── endpoints ───────────────────────────
 @app.get("/health")
 def health() -> dict:
@@ -1220,6 +1332,10 @@ def heartbeat(hb: Heartbeat, p: Principal = Depends(require_master)) -> dict:
         org_token, hb.site_id, hb.site_name, new_summary,
         new_devices if new_devices is not None else prev_devices,
         hb.remote_admin, now,
+    )
+    _record_site_snapshot(
+        org_token, hb.site_id, new_summary,
+        new_devices if new_devices is not None else prev_devices, now,
     )
     if alerts:
         alert_topic = store.get_org_config(org_token).get("alert_topic")
@@ -2303,6 +2419,49 @@ def partner_client_command(
         "El proveedor ejecutó «" + cmd.action + "»"
         + (f" = {cmd.value}" if cmd.value else ""), now)
     return {"ok": True, "command_id": command["id"]}
+
+
+@app.get("/v1/partner/clients/{client_org}/sites/{site_id}/history")
+def partner_client_site_history(
+    client_org: str, site_id: str,
+    p: Principal = Depends(require_partner_account)
+) -> dict:
+    """**Comparar dos momentos:** lista compacta de los snapshots guardados de la
+    sede (marca de tiempo + conteos) para que el socio elija dos y compare. No
+    incluye la lista de equipos aquí (va en /compare) para mantenerlo liviano."""
+    _require_client_of_partner(p, client_org)
+    hist = _load_site_history(client_org, site_id)
+    points = [
+        {
+            "ts": s.get("ts"),
+            "online": s.get("online", 0),
+            "total": s.get("total", 0),
+            "alerts": s.get("alerts", 0),
+            "criticals_down": s.get("criticals_down", 0),
+        }
+        for s in hist
+    ]
+    return {"site_id": site_id, "points": points}
+
+
+@app.get("/v1/partner/clients/{client_org}/sites/{site_id}/compare")
+def partner_client_site_compare(
+    client_org: str, site_id: str, a_ts: str, b_ts: str,
+    p: Principal = Depends(require_partner_account)
+) -> dict:
+    """Compara dos snapshots de la sede (por su `ts`): cambios de conteo y de
+    equipos (nuevos, ausentes, recién bloqueados/desbloqueados, caídos/vueltos).
+    El socio ve la EVOLUCIÓN de la red del cliente entre dos instantes."""
+    _require_client_of_partner(p, client_org)
+    hist = _load_site_history(client_org, site_id)
+    by_ts = {s.get("ts"): s for s in hist}
+    a, b = by_ts.get(a_ts), by_ts.get(b_ts)
+    if a is None or b is None:
+        raise HTTPException(status_code=404, detail="Snapshot no encontrado")
+    # Ordena por tiempo para que 'a' sea el más antiguo y 'b' el más reciente.
+    if a.get("ts", "") > b.get("ts", ""):
+        a, b = b, a
+    return _compare_snapshots(a, b)
 
 
 @app.post("/v1/partner/invite")

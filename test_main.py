@@ -3,6 +3,7 @@
 Llamadas directas a los handlers (sin TestClient) para no depender de httpx.
 """
 import unittest
+from datetime import timedelta
 
 import main
 from fastapi import HTTPException
@@ -702,6 +703,74 @@ class PartnerAccountTests(unittest.TestCase):
                 "org-ajena", "s1",
                 main.CommandIn(action="block", mac="AA:BB"), p=p)
         self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_partner_site_history_and_compare(self):
+        """El socio compara dos momentos de la sede del cliente: ve deltas de
+        conteo y qué equipos aparecieron/se fueron/se bloquearon."""
+        self._promote(self.partner)
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        client_org = main.partner_create_client(
+            main.PartnerClientIn(name="Cliente H"), p=p)["client_org"]
+        t0 = main._now()
+        main._record_site_snapshot(
+            client_org, "casa",
+            {"devices_online": 2, "devices_total": 3, "alerts": 0,
+             "criticals_down": 0},
+            [{"mac": "AA:BB", "name": "TV", "online": True, "trust": "unknown"},
+             {"mac": "CC:DD", "name": "PC", "online": True, "trust": "trusted"}],
+            t0)
+        t1 = t0 + timedelta(seconds=600)
+        main._record_site_snapshot(
+            client_org, "casa",
+            {"devices_online": 1, "devices_total": 3, "alerts": 1,
+             "criticals_down": 1},
+            [{"mac": "AA:BB", "name": "TV", "online": True, "trust": "blocked"},
+             {"mac": "EE:FF", "name": "Nuevo", "online": True,
+              "trust": "unknown"}],
+            t1)
+        hist = main.partner_client_site_history(client_org, "casa", p=p)["points"]
+        self.assertEqual(len(hist), 2)
+        cmp = main.partner_client_site_compare(
+            client_org, "casa",
+            a_ts=t1.isoformat(), b_ts=t0.isoformat(), p=p)  # orden invertido a propósito
+        # el endpoint reordena: 'a' es el más antiguo, 'b' el más reciente
+        self.assertEqual(cmp["a"]["ts"], t0.isoformat())
+        self.assertEqual(cmp["delta"]["online"], -1)
+        self.assertEqual(cmp["delta"]["alerts"], 1)
+        self.assertIn("EE:FF", {d["mac"] for d in cmp["devices"]["new"]})
+        self.assertIn("CC:DD", {d["mac"] for d in cmp["devices"]["gone"]})
+        self.assertIn("AA:BB", {d["mac"] for d in cmp["devices"]["newly_blocked"]})
+
+    def test_partner_site_history_throttled(self):
+        """Dos snapshots muy juntos → solo se guarda uno (acota el almacenamiento)."""
+        self._promote(self.partner)
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        org = main.partner_create_client(
+            main.PartnerClientIn(name="C"), p=p)["client_org"]
+        s = {"devices_online": 1, "devices_total": 1, "alerts": 0,
+             "criticals_down": 0}
+        now = main._now()
+        main._record_site_snapshot(org, "s", s, [], now)
+        main._record_site_snapshot(org, "s", s, [], now + timedelta(seconds=10))
+        self.assertEqual(len(main._load_site_history(org, "s")), 1)
+
+    def test_partner_history_foreign_denied(self):
+        """No puede ver el historial de una org que no gestiona."""
+        self._promote(self.partner)
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        with self.assertRaises(HTTPException) as ctx:
+            main.partner_client_site_history("org-ajena", "s1", p=p)
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_partner_compare_missing_snapshot_404(self):
+        self._promote(self.partner)
+        p = main.require_partner_account(p=main._resolve_principal(self.partner))
+        org = main.partner_create_client(
+            main.PartnerClientIn(name="C2"), p=p)["client_org"]
+        with self.assertRaises(HTTPException) as ctx:
+            main.partner_client_site_compare(
+                org, "s", a_ts="nope-a", b_ts="nope-b", p=p)
+        self.assertEqual(ctx.exception.status_code, 404)
 
 
 class AuditLogTests(unittest.TestCase):
