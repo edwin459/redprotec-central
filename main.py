@@ -140,6 +140,13 @@ COMMAND_TTL_SECONDS = int(os.environ.get("COMMAND_TTL_SECONDS", "600"))
 # cambiable por entorno (ej. TRIAL_DAYS=1) sin tocar código. Solo afecta a las
 # cuentas NUEVAS (las existentes conservan su `trial_ends_at` ya fijado).
 TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
+# Auth-3D (tope de equipos por plan): cuántos TELÉFONOS (con la app) pueden
+# CONTROLAR una sede a la vez. Ver siempre es libre; lo que se topa es cuántos
+# controlan. Prueba = pocos (que el usuario pruebe), pago = más. Configurable por
+# entorno sin tocar código. El dueño no tiene tope. El plan Free (prueba vencida)
+# no controla (can_control=false), así que su tope es irrelevante.
+MAX_DEVICES_TRIAL = int(os.environ.get("MAX_DEVICES_TRIAL", "2"))
+MAX_DEVICES_PRO = int(os.environ.get("MAX_DEVICES_PRO", "10"))
 # Token de super-admin (tú, el dueño del negocio) para marcar cuentas Pro/Free a
 # mano mientras no hay cobro automático. Vacío = el endpoint de admin queda cerrado.
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
@@ -226,11 +233,20 @@ def _compute_entitlement(org: str, now: datetime) -> dict:
         if plan == "trial" and trial_ends_at and now < trial_ends_at:
             trial_days_left = max(0, (trial_ends_at - now).days)
 
+    # Tope de teléfonos que pueden CONTROLAR esta sede, según el plan.
+    if is_owner:
+        max_devices = 9999
+    elif plan == "pro":
+        max_devices = MAX_DEVICES_PRO
+    else:  # trial (vigente o vencido) y free: se muestra el tope de prueba.
+        max_devices = MAX_DEVICES_TRIAL
+
     result = {
         "plan": plan,               # lo que compró/tiene: free | trial | pro
         "effective": effective,     # lo que RIGE ahora: free | pro
         "can_control": can_control, # bloquear/confiar/desbloquear/guardián
         "max_sites": 9999 if is_owner else (5 if can_control else 1),
+        "max_devices": max_devices, # nº de teléfonos que pueden CONTROLAR la sede
         "trial_ends_at": trial_ends_at.isoformat() if trial_ends_at else None,
         "trial_days_left": trial_days_left,
         "owner": is_owner,          # tu cuenta de dueño (Pro permanente)
@@ -243,7 +259,8 @@ def _compute_entitlement(org: str, now: datetime) -> dict:
         from signing import sign_entitlement
         result["token"] = sign_entitlement(store, org, {
             "plan": plan, "effective": effective, "can_control": can_control,
-            "max_sites": result["max_sites"], "trial_days_left": trial_days_left,
+            "max_sites": result["max_sites"], "max_devices": max_devices,
+            "trial_days_left": trial_days_left,
         }, now=now)
     except Exception:  # noqa: BLE001 - si la firma falla, el plan igual se entrega
         pass

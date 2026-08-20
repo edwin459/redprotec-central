@@ -302,6 +302,41 @@ class CloudRbacTests(unittest.TestCase):
         self.assertGreaterEqual(ent["trial_days_left"], main.TRIAL_DAYS - 1)
         self.assertLessEqual(ent["trial_days_left"], main.TRIAL_DAYS)
 
+    def test_trial_has_trial_device_cap(self):
+        # La prueba topa el nº de teléfonos que pueden CONTROLAR (MAX_DEVICES_TRIAL).
+        p = main._resolve_principal("cuenta-tope-trial")
+        ent = main.get_entitlement(p=p)
+        self.assertEqual(ent["plan"], "trial")
+        self.assertEqual(ent["max_devices"], main.MAX_DEVICES_TRIAL)
+
+    def test_pro_has_higher_device_cap(self):
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        main.admin_set_entitlement(
+            main.AdminEntitlementIn(org_token="cuenta-pro-tope", plan="pro"),
+            _=main.require_admin("Bearer admin-secreto-test"))
+        ent = main._compute_entitlement("cuenta-pro-tope", main._now())
+        self.assertEqual(ent["max_devices"], main.MAX_DEVICES_PRO)
+        self.assertGreaterEqual(ent["max_devices"], main.MAX_DEVICES_TRIAL)
+
+    def test_owner_has_unlimited_device_cap(self):
+        main.OWNER_ORGS.add("dueno-tope")
+        try:
+            ent = main._compute_entitlement("dueno-tope", main._now())
+            self.assertGreaterEqual(ent["max_devices"], 1000)
+        finally:
+            main.OWNER_ORGS.discard("dueno-tope")
+
+    def test_signed_token_carries_max_devices(self):
+        p = main._resolve_principal("cuenta-firma-tope")
+        ent = main.get_entitlement(p=p)
+        if not ent.get("token"):
+            self.skipTest("firma no disponible")
+        pub = main.entitlement_pubkey()["public_key"]
+        import jwt as _jwt
+        dec = _jwt.decode(ent["token"], pub, algorithms=["EdDSA"],
+                          options={"verify_aud": False})
+        self.assertEqual(dec["max_devices"], ent["max_devices"])
+
     def test_command_allowed_during_trial(self):
         # self.org es nuevo → prueba Pro → puede comandar.
         out = main.enqueue_command(
