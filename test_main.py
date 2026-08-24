@@ -377,6 +377,83 @@ class CloudRbacTests(unittest.TestCase):
         # No se filtra inventario de equipos de ningún cliente.
         self.assertNotIn("devices_list", out["fleet"][0])
 
+    def test_admin_fleet_exposes_identity_keys(self):
+        """Cada cuenta trae account_name/account_email (para NO mostrar el UUID).
+        En el almacén en memoria no hay tablas de Auth → ambos son None, pero las
+        CLAVES siempre están (contrato estable para la app)."""
+        _seed_site("org-ident-token", "sede", "Sede")
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            out = main.admin_fleet(_=main.require_admin("Bearer admin-secreto-test"))
+        finally:
+            main.ADMIN_TOKEN = ""
+        for acc in out["fleet"]:
+            self.assertIn("account_name", acc)
+            self.assertIn("account_email", acc)
+        # MemoryStore.accounts_identity siempre devuelve {} (sin Auth local).
+        self.assertEqual(main.store.accounts_identity(["cualquiera"]), {})
+
+    def test_admin_suspend_locks_and_unlocks_control(self):
+        """Suspender una cuenta le quita el control (como free) y marca
+        suspended=True; rehabilitar lo revierte. El plan comprado NO se borra."""
+        org = "org-a-suspender"
+        main.store.set_entitlement(org, "pro", None)
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            admin = main.require_admin("Bearer admin-secreto-test")
+            # Antes de suspender: Pro controla.
+            ent = main._compute_entitlement(org, main._now())
+            self.assertTrue(ent["can_control"])
+            self.assertFalse(ent["suspended"])
+            # Suspender.
+            out = main.admin_suspend(main.AdminSuspendIn(org=org, suspended=True), _=admin)
+            self.assertTrue(out["ok"])
+            ent = main._compute_entitlement(org, main._now())
+            self.assertFalse(ent["can_control"])
+            self.assertTrue(ent["suspended"])
+            self.assertEqual(ent["effective"], "free")
+            self.assertEqual(ent["plan"], "pro")  # su plan comprado se conserva
+            # Rehabilitar.
+            main.admin_suspend(main.AdminSuspendIn(org=org, suspended=False), _=admin)
+            ent = main._compute_entitlement(org, main._now())
+            self.assertTrue(ent["can_control"])
+            self.assertFalse(ent["suspended"])
+        finally:
+            main._set_suspended(org, False)
+            main.ADMIN_TOKEN = ""
+
+    def test_admin_cannot_suspend_owner(self):
+        owner = next(iter(main.OWNER_ORGS)) if main.OWNER_ORGS else None
+        if not owner:
+            self.skipTest("sin OWNER_ORGS configurado")
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as ctx:
+                main.admin_suspend(
+                    main.AdminSuspendIn(org=owner, suspended=True),
+                    _=main.require_admin("Bearer admin-secreto-test"))
+            self.assertEqual(ctx.exception.status_code, 400)
+        finally:
+            main.ADMIN_TOKEN = ""
+
+    def test_admin_metrics_and_detail_shape(self):
+        _seed_site("org-metrics", "sede", "Sede")
+        main.store.set_entitlement("org-metrics", "pro", None)
+        main.ADMIN_TOKEN = "admin-secreto-test"
+        try:
+            admin = main.require_admin("Bearer admin-secreto-test")
+            m = main.admin_metrics(_=admin)
+            for k in ("plans", "paying", "trialing", "free", "suspended",
+                      "new_this_month", "trials_expiring", "estimated_mrr"):
+                self.assertIn(k, m)
+            d = main.admin_account_detail("org-metrics", _=admin)
+            for k in ("org", "profile", "plan", "suspended", "sites", "devices"):
+                self.assertIn(k, d)
+            self.assertEqual(d["org"], "org-metrics")
+        finally:
+            main.ADMIN_TOKEN = ""
+
     def test_admin_purge_org_removes_ghost(self):
         """Purga de super-admin: elimina una org FANTASMA (sus sedes) del panel —
         p. ej. la que crea un token de agente revocado que reportó por su cuenta."""

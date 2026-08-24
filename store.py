@@ -102,6 +102,17 @@ class Store(Protocol):
     def kv_get(self, key: str) -> str | None: ...
     def kv_set(self, key: str, value: str) -> None: ...
 
+    # identidad de cuentas (panel del DUEÑO): nombre+correo por org (= sub del
+    # usuario). Une auth.users + public.profiles del MISMO proyecto Supabase.
+    # Devuelve {} si no hay acceso a esas tablas (degrada con elegancia).
+    def accounts_identity(self, orgs: list[str]) -> dict[str, dict]: ...
+    # Detalle de UNA cuenta (perfil + alta) para el panel del dueño.
+    def account_profile(self, org: str) -> dict: ...
+    # TODOS los entitlements (para métricas de negocio: pruebas por vencer, etc.).
+    def iter_entitlements(self) -> list[dict]: ...
+    # Nº de usuarios registrados desde `since` (altas). 0 si no hay acceso a Auth.
+    def new_users_since(self, since: datetime) -> int: ...
+
 
 # ─────────────────────────── memoria ───────────────────────────
 class MemoryStore:
@@ -293,6 +304,24 @@ class MemoryStore:
     def kv_set(self, key: str, value: str) -> None:
         with self._lock:
             self._kv[key] = value
+
+    def accounts_identity(self, orgs: list[str]) -> dict[str, dict]:
+        # En memoria (tests/local) no hay tablas de Auth: sin identidad.
+        return {}
+
+    def account_profile(self, org: str) -> dict:
+        return {}
+
+    def iter_entitlements(self) -> list[dict]:
+        with self._lock:
+            return [
+                {"org": o, "plan": e.get("plan", "free"),
+                 "trial_ends_at": e.get("trial_ends_at")}
+                for o, e in self._entitlements.items()
+            ]
+
+    def new_users_since(self, since: datetime) -> int:
+        return 0
 
 
 # ─────────────────────────── postgres ───────────────────────────
@@ -740,6 +769,88 @@ class PostgresStore:
                 "INSERT INTO relay_kv (k, v) VALUES (%s, %s) "
                 "ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
                 (key, value))
+
+    def accounts_identity(self, orgs: list[str]) -> dict[str, dict]:
+        """{org: {name, email}} para el panel del dueño. Une auth.users (correo)
+        con public.profiles (nombre) del MISMO proyecto Supabase; el org_token de
+        una cuenta = auth.users.id (el `sub` del JWT). Best-effort: si la tabla
+        profiles no existe aún, o el rol no ve el esquema auth, devuelve {} sin
+        romper el panel (solo se cae al UUID como antes)."""
+        ids = [o for o in {*orgs} if o]
+        if not ids:
+            return {}
+        try:
+            with self._connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT u.id::text, COALESCE(p.full_name, ''), "
+                    "       COALESCE(u.email, '') "
+                    "FROM auth.users u "
+                    "LEFT JOIN public.profiles p ON p.id = u.id "
+                    "WHERE u.id::text = ANY(%s)",
+                    (ids,),
+                )
+                rows = cur.fetchall()
+            return {
+                r[0]: {
+                    "name": (r[1] or "").strip() or None,
+                    "email": (r[2] or "").strip() or None,
+                }
+                for r in rows
+            }
+        except Exception as exc:  # noqa: BLE001 - identidad es opcional
+            logger.debug("accounts_identity no disponible: %s", exc)
+            return {}
+
+    def account_profile(self, org: str) -> dict:
+        """Perfil + correo + fecha de alta de UNA cuenta (para el detalle del
+        panel del dueño). {} si no hay acceso a auth/profiles."""
+        try:
+            with self._connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT u.email, u.created_at, p.full_name, p.account_type, "
+                    "       p.company_name, p.phone, p.country, p.city "
+                    "FROM auth.users u "
+                    "LEFT JOIN public.profiles p ON p.id = u.id "
+                    "WHERE u.id::text = %s",
+                    (org,),
+                )
+                row = cur.fetchone()
+            if not row:
+                return {}
+            return {
+                "email": row[0],
+                "created_at": row[1].isoformat() if row[1] else None,
+                "full_name": row[2],
+                "account_type": row[3],
+                "company_name": row[4],
+                "phone": row[5],
+                "country": row[6],
+                "city": row[7],
+            }
+        except Exception as exc:  # noqa: BLE001 - detalle es opcional
+            logger.debug("account_profile no disponible: %s", exc)
+            return {}
+
+    def iter_entitlements(self) -> list[dict]:
+        with self._connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT org_token, plan, trial_ends_at FROM entitlements")
+            rows = cur.fetchall()
+        return [
+            {"org": r[0], "plan": r[1], "trial_ends_at": r[2]} for r in rows
+        ]
+
+    def new_users_since(self, since: datetime) -> int:
+        try:
+            with self._connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM auth.users WHERE created_at >= %s",
+                    (since,),
+                )
+                row = cur.fetchone()
+            return int(row[0] or 0)
+        except Exception as exc:  # noqa: BLE001 - métrica opcional
+            logger.debug("new_users_since no disponible: %s", exc)
+            return 0
 
 
 # ─────────────────────────── selección ───────────────────────────

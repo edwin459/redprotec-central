@@ -203,10 +203,28 @@ def _ensure_entitlement(org: str, now: datetime) -> dict:
     return ent
 
 
+# ── Moderación: SUSPENDER una cuenta (el dueño la desactiva por mal uso) ──────
+# Una cuenta suspendida pierde el control (can_control=False) y se marca
+# `suspended=True` en el entitlement firmado, para que app y agente lo enseñen y
+# lo respeten. Es REVERSIBLE (rehabilitar). Se guarda en el kv del almacén.
+def _is_suspended(org: str) -> bool:
+    try:
+        return store.kv_get(f"suspended::{org}") == "1"
+    except Exception:  # noqa: BLE001 - si el almacén no responde, no suspende
+        return False
+
+
+def _set_suspended(org: str, suspended: bool) -> None:
+    store.kv_set(f"suspended::{org}", "1" if suspended else "")
+
+
 def _compute_entitlement(org: str, now: datetime) -> dict:
     """Calcula el plan EFECTIVO y las capacidades que leen agente, móvil y relay
     (un mismo contrato). `trial` vigente = Pro; `trial` vencido = free."""
     is_owner = org in OWNER_ORGS
+    # Suspensión (moderación del dueño): al dueño NUNCA se le suspende; a los demás,
+    # si está la bandera, el plan efectivo se fuerza a free y se pierde el control.
+    suspended = (not is_owner) and _is_suspended(org)
     if is_owner:
         # Dueño del proyecto: Pro permanente, sin prueba ni vencimiento. No se le
         # crea registro de entitlement (no depende del almacén).
@@ -233,6 +251,11 @@ def _compute_entitlement(org: str, now: datetime) -> dict:
         if plan == "trial" and trial_ends_at and now < trial_ends_at:
             trial_days_left = max(0, (trial_ends_at - now).days)
 
+        # Suspendida: pierde el control aunque su plan fuera Pro/prueba vigente.
+        if suspended:
+            effective = "free"
+            can_control = False
+
     # Tope de teléfonos que pueden CONTROLAR esta sede, según el plan.
     if is_owner:
         max_devices = 9999
@@ -250,6 +273,7 @@ def _compute_entitlement(org: str, now: datetime) -> dict:
         "trial_ends_at": trial_ends_at.isoformat() if trial_ends_at else None,
         "trial_days_left": trial_days_left,
         "owner": is_owner,          # tu cuenta de dueño (Pro permanente)
+        "suspended": suspended,     # moderación: cuenta desactivada por el dueño
     }
     # Auth-3C: **permiso firmado** — el mismo veredicto, firmado por el relay con
     # caducidad, para que el agente/móvil no puedan ser engañados por un proxy o
@@ -260,7 +284,7 @@ def _compute_entitlement(org: str, now: datetime) -> dict:
         result["token"] = sign_entitlement(store, org, {
             "plan": plan, "effective": effective, "can_control": can_control,
             "max_sites": result["max_sites"], "max_devices": max_devices,
-            "trial_days_left": trial_days_left,
+            "trial_days_left": trial_days_left, "suspended": suspended,
         }, now=now)
     except Exception:  # noqa: BLE001 - si la firma falla, el plan igual se entrega
         pass
@@ -2290,6 +2314,18 @@ def _aggregate_fleet(now: datetime, only_orgs: set[str] | None = None) -> dict:
         0 if f["alerts"] else 1,
         -f["devices"],
     ))
+    # Identidad legible: nombre + correo del titular (para NO mostrar el UUID).
+    # Best-effort: si el almacén no puede resolverlo, cada cuenta se queda con su
+    # org (el panel cae al UUID como antes).
+    try:
+        identity = store.accounts_identity([f["org"] for f in fleet])
+    except Exception:  # noqa: BLE001 - identidad es opcional
+        identity = {}
+    for f in fleet:
+        ident = identity.get(f["org"]) or {}
+        f["account_name"] = ident.get("name")
+        f["account_email"] = ident.get("email")
+        f["suspended"] = _is_suspended(f["org"])
     totals = {
         "accounts": len(orgs),
         "accounts_online": sum(1 for f in fleet if f["online"]),
@@ -2309,6 +2345,119 @@ def admin_fleet(_: bool = Depends(require_admin)) -> dict:
     en línea — para dar soporte y ver problemas de raíz. NO expone el inventario
     (equipos/MACs) de la red de ningún cliente: soporte sin vigilar."""
     return _aggregate_fleet(_now())
+
+
+class AdminSuspendIn(BaseModel):
+    org: str = Field(min_length=1, max_length=200)
+    suspended: bool = True
+
+
+@app.post("/v1/admin/suspend")
+def admin_suspend(body: AdminSuspendIn, _: bool = Depends(require_admin)) -> dict:
+    """**Moderación (super-admin):** SUSPENDE (o rehabilita) una cuenta por mal uso.
+    Suspendida = pierde el control (como free) y app/agente muestran «cuenta
+    suspendida». Es reversible. Al dueño no se le puede suspender."""
+    if body.org in OWNER_ORGS:
+        raise HTTPException(status_code=400, detail="No se puede suspender al dueño")
+    _set_suspended(body.org, body.suspended)
+    return {"ok": True, "org": body.org, "suspended": body.suspended,
+            "entitlement": _compute_entitlement(body.org, _now())}
+
+
+@app.get("/v1/admin/account/{org_token}")
+def admin_account_detail(org_token: str, _: bool = Depends(require_admin)) -> dict:
+    """**Ficha de una cuenta (super-admin):** quién es (nombre, correo, tipo,
+    empresa, teléfono, país, alta), su plan/prueba, si está suspendida o es socio,
+    y su uso (sedes/equipos). Para saber TODO de quien te compra sin ver su red."""
+    now = _now()
+    prof = store.account_profile(org_token) or {}
+    ent = _compute_entitlement(org_token, now)
+    sites = store.list_sites(org_token)
+    devices = 0
+    sites_online = 0
+    for _sid, rec in sites:
+        summ = rec.get("summary") or {}
+        devices += int(summ.get("devices_total", 0) or 0)
+        updated = rec.get("updated_at")
+        if updated is not None and (
+                now - updated).total_seconds() <= ONLINE_WINDOW_SECONDS:
+            sites_online += 1
+    return {
+        "org": org_token,
+        "profile": prof,
+        "plan": ent.get("plan"),
+        "effective": ent.get("effective"),
+        "can_control": ent.get("can_control"),
+        "trial_ends_at": ent.get("trial_ends_at"),
+        "trial_days_left": ent.get("trial_days_left"),
+        "owner": ent.get("owner", False),
+        "suspended": _is_suspended(org_token),
+        "is_partner": _is_partner(org_token),
+        "managed_by_partner": bool(store.kv_get(f"managed_by::{org_token}")),
+        "sites": len(sites),
+        "sites_online": sites_online,
+        "devices": devices,
+    }
+
+
+@app.get("/v1/admin/metrics")
+def admin_metrics(_: bool = Depends(require_admin)) -> dict:
+    """**Métricas de negocio (super-admin):** cuántas cuentas de pago / prueba /
+    free, altas del mes y la semana, pruebas por vencer (≤7 días, con nombre) e
+    ingreso mensual estimado. Tu «cuánto vendo» de un vistazo."""
+    now = _now()
+    ents = store.iter_entitlements()
+    dist = {"free": 0, "trial": 0, "pro": 0}
+    suspended_count = 0
+    expiring: list[dict] = []
+    for e in ents:
+        org = e.get("org")
+        if not org:
+            continue
+        if _is_suspended(org):
+            suspended_count += 1
+        plan_eff = _plan_readonly(org, now)
+        dist[plan_eff] = dist.get(plan_eff, 0) + 1
+        te = e.get("trial_ends_at")
+        if e.get("plan") == "trial" and te is not None:
+            if getattr(te, "tzinfo", None) is None:
+                te = te.replace(tzinfo=timezone.utc)
+            if now < te:
+                days = max(0, (te - now).days)
+                if days <= 7:
+                    expiring.append({"org": org, "days_left": days})
+    # Enriquecer las pruebas por vencer con nombre/correo (para el aviso al dueño).
+    ident = store.accounts_identity([x["org"] for x in expiring])
+    for x in expiring:
+        i = ident.get(x["org"]) or {}
+        x["name"] = i.get("name")
+        x["email"] = i.get("email")
+    expiring.sort(key=lambda x: x["days_left"])
+
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    new_month = store.new_users_since(month_start)
+    new_week = store.new_users_since(week_start)
+    total_auth = store.new_users_since(datetime(1970, 1, 1, tzinfo=timezone.utc))
+
+    try:
+        price = float(os.environ.get("PRO_PRICE", "29.99") or 0)
+    except ValueError:
+        price = 0.0
+    return {
+        "plans": dist,
+        "paying": dist["pro"],
+        "trialing": dist["trial"],
+        "free": dist["free"],
+        "suspended": suspended_count,
+        "new_this_month": new_month,
+        "new_this_week": new_week,
+        "total_accounts": total_auth or (dist["free"] + dist["trial"] + dist["pro"]),
+        "trials_expiring": expiring,
+        "estimated_mrr": round(dist["pro"] * price, 2),
+        "currency": os.environ.get("PRO_CURRENCY", "USD"),
+        "generated_at": now.isoformat(),
+    }
 
 
 @app.post("/v1/admin/partner-flag")
