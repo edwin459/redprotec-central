@@ -2373,6 +2373,11 @@ def admin_account_detail(org_token: str, _: bool = Depends(require_admin)) -> di
     """**Ficha de una cuenta (super-admin):** quién es (nombre, correo, tipo,
     empresa, teléfono, país, alta), su plan/prueba, si está suspendida o es socio,
     y su uso (sedes/equipos). Para saber TODO de quien te compra sin ver su red."""
+    return _account_detail(org_token)
+
+
+def _account_detail(org_token: str) -> dict:
+    """Ficha de una cuenta (la comparten el panel admin y el del dueño)."""
     now = _now()
     prof = store.account_profile(org_token) or {}
     ent = _compute_entitlement(org_token, now)
@@ -2761,6 +2766,11 @@ def admin_set_entitlement(
     """Marca el plan de una organización a mano (mientras no hay cobro
     automático). Solo el super-admin (ADMIN_TOKEN). `pro` = control ilimitado;
     `trial` = Pro por `trial_days` (o TRIAL_DAYS); `free` = solo ver."""
+    return _set_entitlement_impl(body)
+
+
+def _set_entitlement_impl(body: AdminEntitlementIn) -> dict:
+    """Aplica un plan a mano (lo comparten el panel admin y el del dueño)."""
     now = _now()
     trial_end = None
     if body.plan == "trial":
@@ -2768,6 +2778,47 @@ def admin_set_entitlement(
         trial_end = now + timedelta(days=days)
     store.set_entitlement(body.org_token, body.plan, trial_end)
     return {"ok": True, "entitlement": _compute_entitlement(body.org_token, now)}
+
+
+# ── Consola de DUEÑO: acciones de gestión (autorizadas por SER dueño) ─────────
+# El agente y la app del dueño gestionan planes/moderación/socio con SUS
+# credenciales normales (sin ADMIN_TOKEN). Reutilizan la misma lógica que el
+# panel super-admin, pero autorizada por `require_owner`.
+@app.get("/v1/owner/account/{org_token}")
+def owner_account_detail(
+    org_token: str, _: Principal = Depends(require_owner)
+) -> dict:
+    """Ficha de una cuenta para el dueño (misma que /admin/account)."""
+    return _account_detail(org_token)
+
+
+@app.put("/v1/owner/entitlement")
+def owner_set_entitlement(
+    body: AdminEntitlementIn, _: Principal = Depends(require_owner)
+) -> dict:
+    """Regalar Pro / extender prueba / poner Free — desde la cuenta dueño."""
+    return _set_entitlement_impl(body)
+
+
+@app.post("/v1/owner/suspend")
+def owner_suspend(
+    body: AdminSuspendIn, _: Principal = Depends(require_owner)
+) -> dict:
+    """Suspender / rehabilitar una cuenta — desde la cuenta dueño (no al dueño)."""
+    if body.org in OWNER_ORGS:
+        raise HTTPException(status_code=400, detail="No se puede suspender al dueño")
+    _set_suspended(body.org, body.suspended)
+    return {"ok": True, "org": body.org, "suspended": body.suspended,
+            "entitlement": _compute_entitlement(body.org, _now())}
+
+
+@app.post("/v1/owner/partner-flag")
+def owner_partner_flag(
+    body: PartnerFlagIn, _: Principal = Depends(require_owner)
+) -> dict:
+    """Promover / quitar a una cuenta como socio (MSP) — desde la cuenta dueño."""
+    store.kv_set(f"is_partner::{body.org}", "1" if body.is_partner else "0")
+    return {"ok": True, "org": body.org, "is_partner": body.is_partner}
 
 
 # ─────────────────── Auth-3C: Google Play Billing ───────────────────

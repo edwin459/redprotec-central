@@ -473,6 +473,17 @@ class CloudRbacTests(unittest.TestCase):
             self.assertIn("totals", fleet)
             metrics = main.owner_metrics(_=p_owner)
             self.assertIn("plans", metrics)
+            # Acciones de gestión owner-write (mismas que el super-admin).
+            out = main.owner_set_entitlement(
+                main.AdminEntitlementIn(org_token="cli-x", plan="pro"), _=p_owner)
+            self.assertEqual(out["entitlement"]["plan"], "pro")
+            sus = main.owner_suspend(
+                main.AdminSuspendIn(org="cli-x", suspended=True), _=p_owner)
+            self.assertTrue(sus["suspended"])
+            det = main.owner_account_detail("cli-x", _=p_owner)
+            self.assertEqual(det["org"], "cli-x")
+            self.assertTrue(det["suspended"])
+            main._set_suspended("cli-x", False)
         finally:
             main.OWNER_ORGS = saved
 
