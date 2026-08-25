@@ -18,6 +18,7 @@ cambia ninguna respuesta: los endpoints hablan solo con la interfaz `Store`.
 from __future__ import annotations
 
 import asyncio
+import base64
 import http.client
 import json
 import logging
@@ -31,13 +32,25 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import (
+    Depends, FastAPI, Header, HTTPException, Request, WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from auth import supabase_auth_configured, verify_supabase_jwt
 from ratelimit import FailureLockout, SlidingWindow, client_ip, int_env
 from store import create_store
+from tunnel import (
+    MAX_BODY_BYTES, TunnelConn, TunnelHub, filter_request_headers,
+    filter_response_headers,
+)
+
+# Acceso remoto sin ngrok: registro de agentes conectados por WebSocket saliente.
+# La app fuera de casa proxya por el relay → el relay reenvía al agente. Ver
+# tunnel.py y los endpoints /v1/tunnel (agente) + /v1/agent/{id}/… (app).
+tunnel_hub = TunnelHub()
 
 logger = logging.getLogger("redprotec.central")
 
@@ -91,7 +104,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.25", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.26", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -125,10 +138,16 @@ async def _rate_limit(request: Request, call_next):
             content={"detail": "Demasiadas peticiones. Baja el ritmo."},
             headers={"Retry-After": "30"})
     response = await call_next(request)
-    if response.status_code in (401, 403):
-        _RL_LOCKOUT.record_failure(ip)
-    elif response.status_code < 400:
-        _RL_LOCKOUT.record_success(ip)
+    # El proxy del túnel (/v1/agent/…) DEVUELVE tal cual el estado del agente: un
+    # 401/403 ahí suele ser la autorización por rol del AGENTE (un GET de fondo sin
+    # permiso), NO un fallo de auth contra el relay. Contarlo bloquearía por
+    # "fuerza bruta" a un usuario legítimo que navega fuera de casa. La clave de
+    # túnel (128 bits) queda protegida por el límite global de inundación.
+    if not request.url.path.startswith("/v1/agent/"):
+        if response.status_code in (401, 403):
+            _RL_LOCKOUT.record_failure(ip)
+        elif response.status_code < 400:
+            _RL_LOCKOUT.record_success(ip)
     return response
 
 
@@ -1279,10 +1298,154 @@ def stats() -> dict:
     }
     try:
         orgs, sites = store.stats()
-        return {"status": "ok", "orgs": orgs, "sites": sites, "watchdog": wd}
+        return {"status": "ok", "orgs": orgs, "sites": sites, "watchdog": wd,
+                "tunnels": tunnel_hub.count()}
     except Exception:  # noqa: BLE001
         return {"status": "db_unavailable", "orgs": None, "sites": None,
-                "watchdog": wd}
+                "watchdog": wd, "tunnels": tunnel_hub.count()}
+
+
+# ── Acceso remoto SIN ngrok: túnel inverso relay↔agente ──────────────────────
+# El agente abre un WebSocket SALIENTE persistente al relay (atraviesa NAT sin
+# abrir puertos). La app fuera de casa manda sus peticiones al relay por
+# /v1/agent/{agent_id}/… y el relay las reenvía por ese WebSocket al agente, que
+# las ejecuta contra su API local y responde. Reemplaza a ngrok como el ÚNICO
+# mecanismo remoto — ahora escalable a miles de agentes. Ver tunnel.py.
+_PROXY_TIMEOUT = float(os.environ.get("TUNNEL_PROXY_TIMEOUT_SECONDS", "30"))
+_TUNNEL_HELLO_TIMEOUT = float(os.environ.get("TUNNEL_HELLO_TIMEOUT_SECONDS", "15"))
+
+
+@app.websocket("/v1/tunnel")
+async def tunnel_ws(ws: WebSocket) -> None:
+    """Canal de control saliente del AGENTE. El agente se autentica con su token
+    (el mismo del latido → resuelve a su organización) y queda registrado por su
+    `agent_id`. Luego recibe peticiones `req` y devuelve `resp` (ver el cliente en
+    el agente: services/relay_tunnel_client.py)."""
+    await ws.accept()
+    conn: TunnelConn | None = None
+    try:
+        try:
+            raw = await asyncio.wait_for(ws.receive_text(), timeout=_TUNNEL_HELLO_TIMEOUT)
+            hello = json.loads(raw)
+        except (asyncio.TimeoutError, ValueError, TypeError):
+            await ws.close(code=4001)
+            return
+        if not isinstance(hello, dict) or hello.get("type") != "hello":
+            await ws.close(code=4002)
+            return
+        token = str(hello.get("token") or "")
+        agent_id = str(hello.get("agent_id") or "")
+        resolve_token = str(hello.get("resolve_token") or "")
+        if not token or not agent_id or not resolve_token:
+            await ws.close(code=4003)
+            return
+        # Autenticación por el MISMO modelo que el resto del relay: el token del
+        # agente debe resolver a una organización maestra. Un token inválido o
+        # revocado se rechaza (no se crea túnel fantasma).
+        try:
+            p = principal(f"Bearer {token}")
+        except HTTPException:
+            await ws.close(code=4401)
+            return
+        if not p.is_master:
+            await ws.close(code=4403)
+            return
+        conn = TunnelConn(ws, p.org_token, agent_id, resolve_token)
+        tunnel_hub.register(conn)
+        await ws.send_text(json.dumps({"type": "ready"}))
+
+        # Bucle de recepción: solo respuestas a peticiones (y pings de vida). Los
+        # `resp` se correlan con su `Future` por `id`.
+        while True:
+            msg = await ws.receive_text()
+            try:
+                data = json.loads(msg)
+            except (ValueError, TypeError):
+                continue
+            mtype = data.get("type")
+            if mtype == "resp":
+                conn.resolve_response(data)
+            elif mtype == "ping":
+                await ws.send_text(json.dumps({"type": "pong"}))
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001 — el WS nunca debe tumbar el proceso
+        logger.warning("Túnel del agente caído: %s: %s", type(exc).__name__, exc)
+    finally:
+        if conn is not None:
+            conn.alive = False
+            conn.fail_all(ConnectionError("el túnel del agente se cerró"))
+            tunnel_hub.unregister(conn)
+
+
+@app.api_route(
+    "/v1/agent/{agent_id}/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+)
+async def agent_proxy(agent_id: str, path: str, request: Request) -> Response:
+    """Proxy de la APP → agente por el túnel. La app apunta aquí cuando está fuera
+    de casa: `{relay}/v1/agent/{agent_id}/api/v1/…`. Se autoriza por la clave de
+    túnel (el `resolve_token` del emparejamiento, en la cabecera X-Tunnel-Key); la
+    autorización REAL de cada acción la sigue haciendo el agente con las cabeceras
+    que viajan intactas (Authorization/X-Device-Id)."""
+    conn = tunnel_hub.get(agent_id)
+    if conn is None:
+        raise HTTPException(
+            status_code=503,
+            detail="El agente no está conectado al relay ahora mismo. Abre "
+                   "RedProtec en tu PC y espera unos segundos.")
+    if not conn.match_key(request.headers.get("x-tunnel-key")):
+        raise HTTPException(status_code=401, detail="Clave de túnel inválida.")
+
+    body = await request.body()
+    if len(body) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Cuerpo demasiado grande para el túnel.")
+
+    fwd_headers = filter_request_headers(dict(request.headers))
+    # SEGURIDAD: la API del agente trata una petición desde 127.0.0.1 SIN cabeceras
+    # de reenvío como "loopback raíz" (el propio Agente en el PC) y le da acceso de
+    # dueño. Como el túnel REPRODUCE la petición desde 127.0.0.1, hay que marcarla
+    # como reenviada para que el agente autentique al TELÉFONO por su token+rol (no
+    # lo eleve a raíz). Se propaga la IP real de la app (la que ve el relay).
+    origin_ip = request.client.host if request.client else "relay"
+    if not any(fwd_headers.get(h) for h in ("x-forwarded-for", "X-Forwarded-For")):
+        fwd_headers["x-forwarded-for"] = origin_ip
+    fwd_headers["x-tunnel-proxy"] = "1"
+    forward_path = "/" + path if not path.startswith("/") else path
+    try:
+        frame = await tunnel_hub.request(
+            conn,
+            method=request.method,
+            path=forward_path,
+            query=request.url.query or "",
+            headers=fwd_headers,
+            body=body,
+            timeout=_PROXY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="El agente no respondió a tiempo.")
+    except ConnectionError:
+        raise HTTPException(status_code=503, detail="Se perdió la conexión con el agente.")
+
+    status = int(frame.get("status") or 502)
+    resp_headers = frame.get("headers") or {}
+    if not isinstance(resp_headers, dict):
+        resp_headers = {}
+    try:
+        content = base64.b64decode(frame.get("body_b64") or "")
+    except (ValueError, TypeError):
+        content = b""
+    media_type = None
+    for k, v in resp_headers.items():
+        if k.lower() == "content-type":
+            media_type = v
+            break
+    return Response(
+        content=content,
+        status_code=status,
+        headers=filter_response_headers(resp_headers),
+        media_type=media_type,
+    )
 
 
 @app.post("/v1/heartbeat")
