@@ -454,6 +454,28 @@ class CloudRbacTests(unittest.TestCase):
         finally:
             main.ADMIN_TOKEN = ""
 
+    def test_owner_endpoints_authz(self):
+        """Los endpoints /v1/owner exigen ser DUEÑO (org en OWNER_ORGS); a otro
+        le dan 403. Al dueño le devuelven la flota/KPIs sin ADMIN_TOKEN."""
+        from fastapi import HTTPException
+        p_no = main.Principal("cuenta-normal", "owner", ["*"], True, "X")
+        with self.assertRaises(HTTPException) as ctx:
+            main.require_owner(p=p_no)
+        self.assertEqual(ctx.exception.status_code, 403)
+
+        saved = main.OWNER_ORGS
+        main.OWNER_ORGS = {"dueno-org"}
+        try:
+            p_owner = main.Principal("dueno-org", "owner", ["*"], True, "Dueño")
+            self.assertIs(main.require_owner(p=p_owner), p_owner)
+            fleet = main.owner_fleet(_=p_owner)
+            self.assertIn("fleet", fleet)
+            self.assertIn("totals", fleet)
+            metrics = main.owner_metrics(_=p_owner)
+            self.assertIn("plans", metrics)
+        finally:
+            main.OWNER_ORGS = saved
+
     def test_admin_purge_org_removes_ghost(self):
         """Purga de super-admin: elimina una org FANTASMA (sus sedes) del panel —
         p. ej. la que crea un token de agente revocado que reportó por su cuenta."""

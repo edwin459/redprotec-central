@@ -1395,10 +1395,14 @@ def heartbeat(hb: Heartbeat, p: Principal = Depends(require_master)) -> dict:
 
     # El agente recibe su plan en cada latido → gatea el control con el MISMO
     # contrato que el móvil (agente y app hablan un solo idioma sobre Free/Pro).
+    # Se añade is_partner para que el AGENTE sepa si mostrar la Consola de Socio
+    # (owner ya viene en el entitlement).
+    ent = _compute_entitlement(org_token, now)
+    ent["is_partner"] = _is_partner(org_token)
     return {
         "ok": True,
         "commands": pending,
-        "entitlement": _compute_entitlement(org_token, now),
+        "entitlement": ent,
     }
 
 
@@ -2405,6 +2409,11 @@ def admin_metrics(_: bool = Depends(require_admin)) -> dict:
     """**Métricas de negocio (super-admin):** cuántas cuentas de pago / prueba /
     free, altas del mes y la semana, pruebas por vencer (≤7 días, con nombre) e
     ingreso mensual estimado. Tu «cuánto vendo» de un vistazo."""
+    return _business_metrics()
+
+
+def _business_metrics() -> dict:
+    """Cálculo de KPIs de negocio (lo comparten el panel admin y el del dueño)."""
     now = _now()
     ents = store.iter_entitlements()
     dist = {"free": 0, "trial": 0, "pro": 0}
@@ -2489,6 +2498,30 @@ def admin_purge_org(org_token: str, _: bool = Depends(require_admin)) -> dict:
         pass
     _SITE_WATCH.pop(org_token, None)
     return {"ok": True, "org": org_token, "sites_removed": removed}
+
+
+def require_owner(p: Principal = Depends(principal)) -> Principal:
+    """La cuenta que llama debe ser **DUEÑO** del proyecto (su org en OWNER_ORGS).
+    Autoriza por la PROPIA sesión/token —sin ADMIN_TOKEN aparte— para que el dueño
+    vea su Consola desde la app y también desde el AGENTE con sus credenciales
+    normales (el agente reporta con su token, que resuelve a la org del dueño)."""
+    if p.org_token not in OWNER_ORGS:
+        raise HTTPException(status_code=403, detail="Requiere cuenta de dueño")
+    return p
+
+
+@app.get("/v1/owner/fleet")
+def owner_fleet(_: Principal = Depends(require_owner)) -> dict:
+    """**Consola de Dueño (autoservicio):** la flota completa (misma vista que
+    /admin/fleet) pero autorizada por SER dueño. Así el agente y la app la muestran
+    con las credenciales normales del dueño, sin pegar el ADMIN_TOKEN."""
+    return _aggregate_fleet(_now())
+
+
+@app.get("/v1/owner/metrics")
+def owner_metrics(_: Principal = Depends(require_owner)) -> dict:
+    """KPIs de negocio para el dueño (mismo cálculo que /admin/metrics)."""
+    return _business_metrics()
 
 
 @app.post("/v1/partner/clients")
