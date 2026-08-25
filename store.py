@@ -782,7 +782,13 @@ class PostgresStore:
         try:
             with self._connection() as conn, conn.cursor() as cur:
                 cur.execute(
-                    "SELECT u.id::text, COALESCE(p.full_name, ''), "
+                    "SELECT u.id::text, "
+                    # Nombre: profiles.full_name y, si está vacío, el que el
+                    # usuario guardó en sus metadatos (full_name/name) — así el
+                    # nombre aparece aunque no haya abierto «Mi perfil».
+                    "       COALESCE(NULLIF(p.full_name, ''), "
+                    "                u.raw_user_meta_data->>'full_name', "
+                    "                u.raw_user_meta_data->>'name', ''), "
                     "       COALESCE(u.email, '') "
                     "FROM auth.users u "
                     "LEFT JOIN public.profiles p ON p.id = u.id "
@@ -807,7 +813,11 @@ class PostgresStore:
         try:
             with self._connection() as conn, conn.cursor() as cur:
                 cur.execute(
-                    "SELECT u.email, u.created_at, p.full_name, p.account_type, "
+                    "SELECT u.email, u.created_at, "
+                    "       COALESCE(NULLIF(p.full_name, ''), "
+                    "                u.raw_user_meta_data->>'full_name', "
+                    "                u.raw_user_meta_data->>'name'), "
+                    "       p.account_type, "
                     "       p.company_name, p.phone, p.country, p.city "
                     "FROM auth.users u "
                     "LEFT JOIN public.profiles p ON p.id = u.id "
