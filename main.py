@@ -46,6 +46,7 @@ from tunnel import (
     MAX_BODY_BYTES, TunnelConn, TunnelHub, filter_request_headers,
     filter_response_headers,
 )
+import ai_identify
 
 # Acceso remoto sin ngrok: registro de agentes conectados por WebSocket saliente.
 # La app fuera de casa proxya por el relay → el relay reenvía al agente. Ver
@@ -104,7 +105,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.26", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.27", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -1502,6 +1503,37 @@ async def agent_ws_bridge(agent_id: str, websocket: WebSocket) -> None:
             await conn.send_json({"type": "ws_close", "channel": channel})
         except Exception:  # noqa: BLE001 — el túnel pudo cerrarse
             pass
+
+
+class AiIdentifyIn(BaseModel):
+    vendor: str | None = None
+    hostname: str | None = None
+    ports: list[str] = Field(default_factory=list)
+    mac_random: bool = False
+    device_type: str | None = None
+
+
+@app.post("/v1/ai/identify")
+def ai_identify_endpoint(body: AiIdentifyIn, p: Principal = Depends(principal)) -> dict:
+    """IA de identificación ESCALABLE (Superar a Fing sin reventar costo). Sirve el
+    modelo desde la CACHÉ GLOBAL (gratis para todos → efecto de red) o, en fallo de
+    caché, dispara una consulta NUEVA al LLM solo si el plan es Pro/Empresa y no se
+    pasó el tope diario. Nunca persiste datos personales (solo hash→modelo)."""
+    ent = _compute_entitlement(p.org_token, _now())
+    # Pro o prueba activa (effective=pro) puede disparar consultas nuevas.
+    plan_ok = bool(ent.get("effective") == "pro")
+    return ai_identify.identify(store, p.org_token, body.model_dump(), plan_ok=plan_ok)
+
+
+@app.get("/v1/ai/health")
+def ai_health() -> dict:
+    """Estado de la IA del relay (sin secretos): ¿hay llave central?, modelo, topes."""
+    return {
+        "enabled": ai_identify.enabled(),
+        "model": ai_identify._GEMINI_MODEL if ai_identify.enabled() else None,
+        "daily_cap": ai_identify._DAILY_CAP,
+        "org_daily_cap": ai_identify._ORG_DAILY_CAP,
+    }
 
 
 @app.post("/v1/heartbeat")
