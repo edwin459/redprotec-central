@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -178,8 +179,20 @@ def parse_assessment(raw: str) -> dict | None:
             "recommendations": recs}
 
 
+# Último error del LLM (para diagnóstico honesto: distinguir "unknown genuino" de
+# "la llamada a Gemini falló"). Nunca contiene la llave (solo el cuerpo de error de
+# Google, que no la incluye). Se expone en la respuesta solo al DUEÑO autenticado.
+_LAST_LLM_ERROR = ""
+
+
+def last_llm_error() -> str:
+    return _LAST_LLM_ERROR
+
+
 def _call_gemini(system: str, user: str, timeout: float = 20.0) -> str | None:
+    global _LAST_LLM_ERROR
     if not _GEMINI_KEY:
+        _LAST_LLM_ERROR = "no_key"
         return None
     url = f"{_GEMINI_URL}/{_GEMINI_MODEL}:generateContent?key={_GEMINI_KEY}"
     body = json.dumps({
@@ -193,9 +206,21 @@ def _call_gemini(system: str, user: str, timeout: float = 20.0) -> str | None:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             data = json.loads(resp.read().decode("utf-8", "ignore"))
-        return (data.get("candidates") or [{}])[0].get(
+        text = (data.get("candidates") or [{}])[0].get(
             "content", {}).get("parts", [{}])[0].get("text")
+        if not text:
+            # 200 pero sin texto (p. ej. bloqueo de seguridad / respuesta vacía).
+            _LAST_LLM_ERROR = "empty:" + json.dumps(data)[:200]
+            return None
+        _LAST_LLM_ERROR = ""
+        return text
+    except urllib.error.HTTPError as exc:  # noqa: PERF203
+        detail = exc.read().decode("utf-8", "ignore")[:250] if hasattr(exc, "read") else ""
+        _LAST_LLM_ERROR = f"http_{exc.code}:{detail}"
+        logger.warning("Gemini (relay) HTTP %s: %s", exc.code, detail)
+        return None
     except Exception as exc:  # noqa: BLE001
+        _LAST_LLM_ERROR = f"exc:{type(exc).__name__}:{exc}"[:250]
         logger.warning("Gemini (relay) falló: %s", exc)
         return None
 

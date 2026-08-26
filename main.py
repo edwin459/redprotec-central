@@ -1525,7 +1525,15 @@ def ai_identify_endpoint(body: AiIdentifyIn, p: Principal = Depends(principal)) 
     ent = _compute_entitlement(p.org_token, _now())
     # Pro o prueba activa (effective=pro) puede disparar consultas nuevas.
     plan_ok = bool(ent.get("effective") == "pro")
-    return ai_identify.identify(store, p.org_token, body.model_dump(), plan_ok=plan_ok)
+    out = ai_identify.identify(store, p.org_token, body.model_dump(), plan_ok=plan_ok)
+    # Diagnóstico honesto SOLO para el dueño: si quedó unknown por un fallo del LLM,
+    # devuelve el detalle real (nunca incluye la llave). Ayuda a distinguir "Gemini
+    # no lo reconoció" de "la llave/permiso de Gemini está mal".
+    if ent.get("owner") and out.get("reason") == "unknown":
+        err = ai_identify.last_llm_error()
+        if err:
+            out = {**out, "llm_error": err}
+    return out
 
 
 class AiAssessIn(BaseModel):
