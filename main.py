@@ -1508,7 +1508,10 @@ async def agent_ws_bridge(agent_id: str, websocket: WebSocket) -> None:
 class AiIdentifyIn(BaseModel):
     vendor: str | None = None
     hostname: str | None = None
-    ports: list[str] = Field(default_factory=list)
+    # El agente envía los puertos como ENTEROS (list[int]); se aceptan también como
+    # str por compatibilidad. El motor normaliza a texto internamente (str(p)). Con
+    # list[str] estricto, el agente recibía 422 y NO se identificaba nada con puertos.
+    ports: list[int | str] = Field(default_factory=list)
     mac_random: bool = False
     device_type: str | None = None
 
@@ -1528,7 +1531,8 @@ def ai_identify_endpoint(body: AiIdentifyIn, p: Principal = Depends(principal)) 
 class AiAssessIn(BaseModel):
     model: str | None = None
     category: str | None = None
-    ports: list[str] = Field(default_factory=list)
+    # Puertos como ENTEROS (list[int]) o str — el agente manda int. Ver AiIdentifyIn.
+    ports: list[int | str] = Field(default_factory=list)
 
 
 @app.post("/v1/ai/assess")
