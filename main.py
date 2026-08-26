@@ -105,7 +105,7 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RedProtec Central Relay", version="0.9.27", lifespan=lifespan)
+app = FastAPI(title="RedProtec Central Relay", version="0.9.28", lifespan=lifespan)
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
@@ -1523,6 +1523,22 @@ def ai_identify_endpoint(body: AiIdentifyIn, p: Principal = Depends(principal)) 
     # Pro o prueba activa (effective=pro) puede disparar consultas nuevas.
     plan_ok = bool(ent.get("effective") == "pro")
     return ai_identify.identify(store, p.org_token, body.model_dump(), plan_ok=plan_ok)
+
+
+class AiAssessIn(BaseModel):
+    model: str | None = None
+    category: str | None = None
+    ports: list[str] = Field(default_factory=list)
+
+
+@app.post("/v1/ai/assess")
+def ai_assess_endpoint(body: AiAssessIn, p: Principal = Depends(principal)) -> dict:
+    """Evaluación de seguridad por IA (Superar a Firewalla en software): dado el
+    modelo + puertos, riesgos conocidos + recomendaciones. Caché global (gratis) +
+    gate por plan + topes — misma economía que /v1/ai/identify."""
+    ent = _compute_entitlement(p.org_token, _now())
+    plan_ok = bool(ent.get("effective") == "pro")
+    return ai_identify.assess(store, p.org_token, body.model_dump(), plan_ok=plan_ok)
 
 
 @app.get("/v1/ai/health")

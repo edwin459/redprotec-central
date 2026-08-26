@@ -69,6 +69,31 @@ class AiIdentifyTests(unittest.TestCase):
         self.assertFalse(out["available"])
         self.assertEqual(out["reason"], "relay_ai_off")
 
+    def test_assess_pro_and_cache(self):
+        ai_identify._call_gemini = lambda *a, **k: (
+            '{"risk_level":"critical","confidence":85,'
+            '"findings":[{"title":"Telnet","severity":"critical","detail":"claves de fabrica"}],'
+            '"recommendations":["Bloquea el equipo","Cambia la clave"]}'
+        )
+        sig = {"model": "XMeye DVR", "category": "camera", "ports": ["34567", "23"]}
+        out = ai_identify.assess(self.store, "org1", sig, plan_ok=True)
+        self.assertTrue(out["available"])
+        self.assertEqual(out["risk_level"], "critical")
+        self.assertEqual(len(out["findings"]), 1)
+        self.assertEqual(len(out["recommendations"]), 2)
+        # Caché: sirve gratis a un Free sin llamar al LLM.
+        ai_identify._call_gemini = lambda *a, **k: (_ for _ in ()).throw(AssertionError("no debía llamar"))
+        out2 = ai_identify.assess(self.store, "orgY", sig, plan_ok=False)
+        self.assertTrue(out2["available"])
+        self.assertTrue(out2["cached"])
+        self.assertEqual(out2["risk_level"], "critical")
+
+    def test_parse_assessment_clamps_and_defaults(self):
+        r = ai_identify.parse_assessment('{"risk_level":"weird","confidence":999,"findings":[{"title":"x","severity":"nope","detail":"y"}]}')
+        self.assertEqual(r["risk_level"], "low")   # nivel inválido → low
+        self.assertEqual(r["confidence"], 100)     # clamp
+        self.assertEqual(r["findings"][0]["severity"], "medium")  # severidad inválida → medium
+
 
 if __name__ == "__main__":
     unittest.main()
