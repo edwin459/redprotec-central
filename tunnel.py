@@ -45,7 +45,7 @@ class TunnelConn:
     respuesta con su petición por `id`."""
 
     __slots__ = ("ws", "org", "agent_id", "resolve_token", "pending", "_send_lock",
-                 "alive")
+                 "alive", "ws_channels")
 
     def __init__(self, ws, org: str, agent_id: str, resolve_token: str):
         self.ws = ws
@@ -55,6 +55,11 @@ class TunnelConn:
         self.pending: dict[str, asyncio.Future] = {}
         self._send_lock = asyncio.Lock()
         self.alive = True
+        # WebSocket EN VIVO por el túnel (Fase B): cada conexión WS de la app abre
+        # un "canal" con una cola de salida; el agente conecta al /api/v1/ws local
+        # y los mensajes fluyen en ambos sentidos por el mismo túnel. cid -> Queue
+        # de texto hacia la app (None = cerrar).
+        self.ws_channels: dict[str, asyncio.Queue] = {}
 
     def match_key(self, provided: str | None) -> bool:
         """Compara en tiempo constante la clave de túnel que trae la app contra el
@@ -73,11 +78,28 @@ class TunnelConn:
         if fut is not None and not fut.done():
             fut.set_result(data)
 
+    def deliver_ws(self, channel: str, data) -> None:
+        """Encola un mensaje del agente hacia la app por su canal WS (None cierra)."""
+        q = self.ws_channels.get(channel)
+        if q is not None:
+            try:
+                q.put_nowait(data)
+            except asyncio.QueueFull:  # cola sin límite normalmente; defensivo
+                pass
+
     def fail_all(self, exc: Exception) -> None:
         for fut in list(self.pending.values()):
             if not fut.done():
                 fut.set_exception(exc)
         self.pending.clear()
+        # Cerrar todos los canales WS vivos (señal None) para que sus escritores
+        # terminen y la app se reconecte.
+        for q in list(self.ws_channels.values()):
+            try:
+                q.put_nowait(None)
+            except Exception:  # noqa: BLE001
+                pass
+        self.ws_channels.clear()
 
 
 class TunnelHub:

@@ -1365,6 +1365,10 @@ async def tunnel_ws(ws: WebSocket) -> None:
             mtype = data.get("type")
             if mtype == "resp":
                 conn.resolve_response(data)
+            elif mtype == "ws_recv":
+                conn.deliver_ws(data.get("channel"), data.get("data"))
+            elif mtype == "ws_closed":
+                conn.deliver_ws(data.get("channel"), None)
             elif mtype == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
     except WebSocketDisconnect:
@@ -1446,6 +1450,58 @@ async def agent_proxy(agent_id: str, path: str, request: Request) -> Response:
         headers=filter_response_headers(resp_headers),
         media_type=media_type,
     )
+
+
+@app.websocket("/v1/agent/{agent_id}/api/v1/ws")
+async def agent_ws_bridge(agent_id: str, websocket: WebSocket) -> None:
+    """WebSocket EN VIVO de la app por el túnel (Fase B). La app fuera de casa
+    conecta aquí (mismo prefijo que el proxy) y el relay abre un canal por el
+    túnel del agente; el agente conecta a su /api/v1/ws local y los mensajes
+    fluyen en ambos sentidos. Autoriza por la clave de túnel (?tk= o X-Tunnel-Key).
+    Así el panel se ve EN VIVO fuera de casa (sin caer a solo-sondeo)."""
+    conn = tunnel_hub.get(agent_id)
+    tk = websocket.query_params.get("tk") or websocket.headers.get("x-tunnel-key")
+    if conn is None or not conn.match_key(tk):
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+    channel = uuid.uuid4().hex
+    queue: asyncio.Queue = asyncio.Queue()
+    conn.ws_channels[channel] = queue
+
+    async def pump_to_app() -> None:
+        # Drena la cola del canal hacia la app, en orden. None = cerrar.
+        while True:
+            data = await queue.get()
+            if data is None:
+                break
+            try:
+                await websocket.send_text(data)
+            except Exception:  # noqa: BLE001
+                break
+
+    writer = asyncio.create_task(pump_to_app())
+    try:
+        # Filtra la query para no reenviar la propia clave de túnel al agente.
+        q = "&".join(
+            p for p in (websocket.url.query or "").split("&")
+            if p and not p.startswith("tk=")
+        )
+        await conn.send_json({"type": "ws_open", "channel": channel, "query": q})
+        while True:
+            data = await websocket.receive_text()
+            await conn.send_json({"type": "ws_send", "channel": channel, "data": data})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("WS bridge caído (%s): %s", agent_id, exc)
+    finally:
+        conn.ws_channels.pop(channel, None)
+        writer.cancel()
+        try:
+            await conn.send_json({"type": "ws_close", "channel": channel})
+        except Exception:  # noqa: BLE001 — el túnel pudo cerrarse
+            pass
 
 
 @app.post("/v1/heartbeat")

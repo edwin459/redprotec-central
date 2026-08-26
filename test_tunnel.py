@@ -124,6 +124,34 @@ class TunnelHubTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_ws_channel_delivery_and_close(self):
+        async def scenario():
+            conn = TunnelConn(FakeWS(), "org-1", "agentX", "rtok")
+            q = asyncio.Queue()
+            conn.ws_channels["c1"] = q
+            # Un mensaje del agente hacia la app por el canal.
+            conn.deliver_ws("c1", "hola")
+            self.assertEqual(await q.get(), "hola")
+            # Canal desconocido: no rompe.
+            conn.deliver_ws("desconocido", "x")
+            # Cierre del canal (ws_closed).
+            conn.deliver_ws("c1", None)
+            self.assertIsNone(await q.get())
+
+        asyncio.run(scenario())
+
+    def test_fail_all_closes_ws_channels(self):
+        async def scenario():
+            conn = TunnelConn(FakeWS(), "org-1", "agentX", "rtok")
+            q = asyncio.Queue()
+            conn.ws_channels["c1"] = q
+            conn.fail_all(ConnectionError("caida"))
+            # El canal recibe el centinela de cierre y el registro se vacía.
+            self.assertIsNone(await q.get())
+            self.assertEqual(conn.ws_channels, {})
+
+        asyncio.run(scenario())
+
     def test_key_match_constant_time(self):
         conn = TunnelConn(FakeWS(), "org-1", "agentX", "secreto-largo")
         self.assertTrue(conn.match_key("secreto-largo"))
