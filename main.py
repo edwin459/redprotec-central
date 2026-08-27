@@ -23,10 +23,12 @@ import http.client
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import threading
 import time
+import unicodedata
 import urllib.request
 import uuid
 from contextlib import asynccontextmanager
@@ -2231,6 +2233,221 @@ def fleet_brief(p: Principal = Depends(principal)) -> dict:
         "generated_at": now.isoformat(),
         "role": p.role,
     }
+
+
+# ── Copiloto de Flota (Fleet Copilot que ACTÚA) ──────────────────────────────
+# Frente B «mejor que Fing»: una orden en lenguaje natural → propuesta → confirmas
+# → se EJECUTA en varias sedes a la vez. Fing no ejecuta NADA. v1 cubre las
+# acciones que el pipeline de comandos ya corre de punta a punta (el agente las
+# ejecuta desde su latido vía MitigationService): BLOQUEAR / DESBLOQUEAR / CONFIAR
+# un equipo en todas las sedes donde aparece. Reusa el MISMO encolado y guards que
+# `/v1/sites/{id}/commands`. El parser y el resolvedor son PUROS y testeables.
+_FLEET_VERBS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # unblock ANTES que block: "desbloquea" contiene "bloquea".
+    ("unblock", ("desbloquea", "desbloquear", "reactiva", "reactivar",
+                 "restaura", "restaurar", "quita el bloqueo", "quitar el bloqueo")),
+    ("trust", ("confia", "confiar", "marca confiable", "marcar confiable",
+               "es mio", "de confianza", "aprueba", "aprobar")),
+    ("block", ("bloquea", "bloquear", "veta", "vetar", "expulsa", "expulsar",
+               "corta el internet", "corta internet")),
+)
+# Relleno que NO forma parte del nombre del equipo a buscar.
+_FLEET_STOP = frozenset({
+    "en", "todas", "todos", "las", "los", "la", "el", "sede", "sedes", "flota",
+    "toda", "todo", "de", "del", "mi", "mis", "red", "equipo", "dispositivo",
+    "aparezca", "aparece", "por", "favor", "a", "que", "se", "llama", "llamado",
+    "esta", "este", "un", "una",
+})
+
+
+def _strip_accents(s: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _parse_fleet_command(text: str) -> tuple[str | None, str]:
+    """(acción, consulta_de_equipo) desde lenguaje natural. acción=None si no se
+    reconoce un verbo. PURA, sin I/O."""
+    t = _strip_accents((text or "").lower()).strip()
+    action: str | None = None
+    for act, verbs in _FLEET_VERBS:
+        for v in verbs:
+            if v in t:
+                action = act
+                t = t.replace(v, " ")
+                break
+        if action:
+            break
+    if action is None:
+        return None, ""
+    tokens = [w for w in re.split(r"[^\w:.\-]+", t) if w and w not in _FLEET_STOP]
+    return action, " ".join(tokens).strip()
+
+
+def _looks_like_mac(q: str) -> bool:
+    h = q.replace(":", "").replace("-", "")
+    return len(h) >= 6 and all(c in "0123456789abcdefABCDEF" for c in h)
+
+
+def _resolve_fleet_devices(
+    scoped_sites: list[tuple[str, dict]], query: str,
+) -> list[dict]:
+    """Equipos de la flota que casan con la consulta (nombre o MAC), agregados por
+    MAC con las sedes donde aparece cada uno. PURA."""
+    q = _strip_accents(query.lower()).strip()
+    if not q:
+        return []
+    is_mac = _looks_like_mac(q)
+    q_mac = q.replace(":", "").replace("-", "") if is_mac else ""
+    agg: dict[str, dict] = {}
+    for site_id, rec in scoped_sites:
+        for d in (rec.get("devices") or []):
+            mac = (d.get("mac") or "").upper()
+            if not mac:
+                continue
+            name = d.get("name") or ""
+            hay = _strip_accents(name.lower())
+            if is_mac:
+                matched = q_mac in mac.replace(":", "").replace("-", "").lower()
+            else:
+                matched = q in hay or any(
+                    tok in hay.split() for tok in q.split() if len(tok) >= 3
+                )
+            if not matched:
+                continue
+            e = agg.setdefault(mac, {"mac": mac, "name": name or mac, "sites": []})
+            if (not e["name"] or e["name"] == mac) and name:
+                e["name"] = name
+            e["sites"].append({
+                "site_id": site_id, "site_name": rec["site_name"],
+                "trust": d.get("trust") or "unknown",
+                "remote_admin": bool(rec.get("remote_admin")),
+            })
+    return sorted(agg.values(), key=lambda e: -len(e["sites"]))
+
+
+_FLEET_ACTION_LABEL = {
+    "block": "Bloquear", "unblock": "Desbloquear", "trust": "Marcar de confianza",
+}
+
+
+class FleetPlanIn(BaseModel):
+    text: str = Field(min_length=1, max_length=300)
+
+
+@app.post("/v1/fleet/plan")
+def fleet_plan(body: FleetPlanIn, p: Principal = Depends(principal)) -> dict:
+    """Interpreta una orden en lenguaje natural y devuelve una PROPUESTA (qué
+    acción, a qué equipo, en qué sedes) para que la app la confirme. NO ejecuta
+    nada. Filtra al alcance de quien llama."""
+    scoped = [
+        (site_id, rec) for site_id, rec in store.list_sites(p.org_token)
+        if p.sees_site(site_id)
+    ]
+    action, query = _parse_fleet_command(body.text)
+    if action is None:
+        return {"ok": False, "reason": "no_action",
+                "message": "No entendí la acción. Prueba: «bloquea …», "
+                           "«desbloquea …» o «confía en …»."}
+    if not query:
+        return {"ok": False, "reason": "no_device",
+                "message": "¿A qué equipo? Di su nombre o MAC. Ej.: «bloquea la "
+                           "Samsung en todas las sedes»."}
+    matches = _resolve_fleet_devices(scoped, query)
+    if not matches:
+        return {"ok": False, "reason": "no_match",
+                "message": f"No encontré ningún equipo que coincida con «{query}» "
+                           f"en tu flota."}
+    if len(matches) > 1:
+        return {
+            "ok": False, "reason": "ambiguous",
+            "message": f"Hay {len(matches)} equipos que coinciden con «{query}». "
+                       f"Especifica cuál (nombre exacto o MAC).",
+            "candidates": [
+                {"mac": m["mac"], "name": m["name"], "site_count": len(m["sites"])}
+                for m in matches[:8]
+            ],
+        }
+    dev = matches[0]
+    cap = _CMD_CAP.get(action, action)
+    can_control = _compute_entitlement(p.org_token, _now())["can_control"]
+    sites_out: list[dict] = []
+    eligible = 0
+    for s in dev["sites"]:
+        ok, reason = True, None
+        if not s["remote_admin"]:
+            ok, reason = False, "sin admin remota"
+        elif not p.can(cap):
+            ok, reason = False, "sin permiso"
+        elif not can_control:
+            ok, reason = False, "requiere Pro"
+        if ok:
+            eligible += 1
+        sites_out.append({
+            "site_id": s["site_id"], "site_name": s["site_name"],
+            "trust": s["trust"], "eligible": ok, "reason": reason,
+        })
+    return {
+        "ok": True,
+        "action": action,
+        "action_label": _FLEET_ACTION_LABEL.get(action, action),
+        "device": {"mac": dev["mac"], "name": dev["name"]},
+        "sites": sites_out,
+        "eligible_count": eligible,
+    }
+
+
+class FleetActIn(BaseModel):
+    action: str = Field(pattern="^(block|trust|unblock)$")
+    mac: str = Field(min_length=1, max_length=64)
+    site_ids: list[str] = Field(min_length=1, max_length=500)
+    confirmed: bool = False
+
+
+@app.post("/v1/fleet/act")
+def fleet_act(body: FleetActIn, p: Principal = Depends(principal)) -> dict:
+    """EJECUTA una acción de flota: encola el comando en cada sede indicada (mismo
+    mecanismo y guards que `/v1/sites/{id}/commands`). Exige confirmación
+    explícita. Devuelve el resultado por sede."""
+    if not body.confirmed:
+        raise HTTPException(status_code=400, detail="Falta confirmación")
+    now = _now()
+    cap = _CMD_CAP.get(body.action, body.action)
+    if not p.can(cap):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Tu rol ({p.role}) no puede ejecutar «{body.action}» a distancia")
+    if not _compute_entitlement(p.org_token, now)["can_control"]:
+        raise HTTPException(status_code=402, detail="upgrade_required")
+    results: list[dict] = []
+    queued = 0
+    for site_id in body.site_ids:
+        if not p.sees_site(site_id):
+            results.append({"site_id": site_id, "queued": False,
+                            "reason": "fuera de alcance"})
+            continue
+        rec = store.get_site(p.org_token, site_id)
+        if not rec:
+            results.append({"site_id": site_id, "queued": False,
+                            "reason": "sede no encontrada"})
+            continue
+        if not rec.get("remote_admin"):
+            results.append({"site_id": site_id, "site_name": rec["site_name"],
+                            "queued": False, "reason": "sin admin remota"})
+            continue
+        command = {
+            "id": uuid.uuid4().hex[:12], "action": body.action,
+            "mac": body.mac, "value": None, "created_at": now,
+        }
+        store.enqueue_command(p.org_token, site_id, command)
+        queued += 1
+        results.append({"site_id": site_id, "site_name": rec["site_name"],
+                        "queued": True, "command_id": command["id"]})
+    _audit(p, f"fleet:{body.action}", body.mac,
+           f"Acción de flota «{body.action}» encolada en {queued} sede(s)")
+    return {"ok": True, "queued_count": queued, "results": results}
 
 
 _GRADE_BANDS = [(90, "A"), (75, "B"), (60, "C"), (40, "D"), (0, "F")]

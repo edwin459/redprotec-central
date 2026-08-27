@@ -776,6 +776,126 @@ class FleetBriefTests(unittest.TestCase):
         self.assertEqual([a["site_id"] for a in out["attention"]], ["bogota"])
 
 
+class FleetCopilotTests(unittest.TestCase):
+    """Copiloto de Flota (/v1/fleet/plan + /v1/fleet/act): orden NL → propuesta →
+    ejecución en varias sedes. Reusa el encolado de comandos."""
+
+    def setUp(self):
+        main._STORE.clear()
+        main._ACCESS.clear()
+        main._COMMANDS.clear()
+        if hasattr(main.store, "_entitlements"):
+            main.store._entitlements.clear()
+        self.org = "org-copilot-token-7777"
+
+    def _seed(self, site_id, name, devices, *, remote_admin=True):
+        main._STORE.setdefault(self.org, {})[site_id] = {
+            "site_name": name,
+            "summary": main.SiteSummary().model_dump(),
+            "devices": devices,
+            "remote_admin": remote_admin,
+            "updated_at": main._now(),
+        }
+
+    def _plan(self, text, token=None):
+        return main.fleet_plan(
+            main.FleetPlanIn(text=text),
+            p=main._resolve_principal(token or self.org))
+
+    # ── parser puro ──────────────────────────────────────────────────────────
+    def test_parser_actions_and_query(self):
+        self.assertEqual(main._parse_fleet_command("bloquea la Samsung en todas las sedes"),
+                         ("block", "samsung"))
+        self.assertEqual(main._parse_fleet_command("desbloquea el iPhone")[0], "unblock")
+        self.assertEqual(main._parse_fleet_command("confía en la impresora")[0], "trust")
+        self.assertEqual(main._parse_fleet_command("hola qué tal")[0], None)
+
+    def test_parser_unblock_not_confused_with_block(self):
+        # "desbloquea" contiene "bloquea": debe ganar unblock.
+        action, _ = main._parse_fleet_command("desbloquea la tablet")
+        self.assertEqual(action, "unblock")
+
+    # ── plan ─────────────────────────────────────────────────────────────────
+    def test_plan_resolves_device_across_sites(self):
+        dev = {"mac": "AA:BB:CC:00:00:01", "name": "Samsung TV", "trust": "unknown"}
+        self._seed("bogota", "Bogotá", [dev])
+        self._seed("medellin", "Medellín", [dev])
+        out = self._plan("bloquea la samsung en todas las sedes")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["action"], "block")
+        self.assertEqual(out["device"]["mac"], "AA:BB:CC:00:00:01")
+        self.assertEqual(len(out["sites"]), 2)
+        self.assertEqual(out["eligible_count"], 2)  # dueño = Pro + admin remota
+
+    def test_plan_no_match(self):
+        self._seed("bogota", "Bogotá", [{"mac": "AA", "name": "Router", "trust": "trusted"}])
+        out = self._plan("bloquea la playstation")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "no_match")
+
+    def test_plan_ambiguous_lists_candidates(self):
+        self._seed("bogota", "Bogotá", [
+            {"mac": "AA:00:00:00:00:01", "name": "iPhone de Ana", "trust": "trusted"},
+            {"mac": "BB:00:00:00:00:02", "name": "iPhone de Beto", "trust": "trusted"},
+        ])
+        out = self._plan("bloquea el iphone")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "ambiguous")
+        self.assertEqual(len(out["candidates"]), 2)
+
+    def test_plan_site_without_remote_admin_not_eligible(self):
+        dev = {"mac": "AA:BB:CC:00:00:09", "name": "Laptop", "trust": "unknown"}
+        self._seed("a", "A", [dev], remote_admin=True)
+        self._seed("b", "B", [dev], remote_admin=False)
+        out = self._plan("bloquea la laptop")
+        self.assertEqual(out["eligible_count"], 1)
+        byid = {s["site_id"]: s for s in out["sites"]}
+        self.assertTrue(byid["a"]["eligible"])
+        self.assertFalse(byid["b"]["eligible"])
+
+    # ── act ──────────────────────────────────────────────────────────────────
+    def test_act_requires_confirmation(self):
+        self._seed("bogota", "Bogotá", [{"mac": "AA", "name": "X", "trust": "unknown"}])
+        with self.assertRaises(main.HTTPException) as ctx:
+            main.fleet_act(
+                main.FleetActIn(action="block", mac="AA", site_ids=["bogota"],
+                                confirmed=False),
+                p=main._resolve_principal(self.org))
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_act_fans_out_and_enqueues(self):
+        dev = {"mac": "AA:BB:CC:00:00:01", "name": "Samsung", "trust": "unknown"}
+        self._seed("bogota", "Bogotá", [dev])
+        self._seed("medellin", "Medellín", [dev])
+        out = main.fleet_act(
+            main.FleetActIn(action="block", mac="AA:BB:CC:00:00:01",
+                            site_ids=["bogota", "medellin"], confirmed=True),
+            p=main._resolve_principal(self.org))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["queued_count"], 2)
+        # El comando quedó realmente encolado en cada sede.
+        for sid in ("bogota", "medellin"):
+            pend = main.store.pending_commands(self.org, sid, 3600, main._now())
+            self.assertEqual(len(pend), 1)
+            self.assertEqual(pend[0]["action"], "block")
+            self.assertEqual(pend[0]["mac"], "AA:BB:CC:00:00:01")
+
+    def test_act_scope_blocks_foreign_site(self):
+        dev = {"mac": "AA", "name": "X", "trust": "unknown"}
+        self._seed("bogota", "Bogotá", [dev])
+        self._seed("medellin", "Medellín", [dev])
+        main._ACCESS[self.org] = {
+            "u-bog": {"name": "Ana", "role": "security", "sites": ["bogota"]}}
+        out = main.fleet_act(
+            main.FleetActIn(action="block", mac="AA",
+                            site_ids=["bogota", "medellin"], confirmed=True),
+            p=main._resolve_principal("u-bog"))
+        byid = {r["site_id"]: r for r in out["results"]}
+        self.assertTrue(byid["bogota"]["queued"])
+        self.assertFalse(byid["medellin"]["queued"])  # fuera de alcance
+        self.assertEqual(byid["medellin"]["reason"], "fuera de alcance")
+
+
 class ComplianceAndAvailabilityTests(unittest.TestCase):
     """Postura de Cumplimiento (/v1/compliance) y Disponibilidad (/v1/availability)."""
 
