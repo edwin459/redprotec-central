@@ -170,6 +170,54 @@
   .ftile .fm .m .n{font-size:19px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1}
   .ftile .fm .m .t{font-size:10.5px;color:var(--muted);margin-top:3px}
 
+  /* ---------- SALA DE GUERRA (NOC) ---------- */
+  .warhero{display:grid;grid-template-columns:auto 1fr auto;gap:26px;align-items:center;
+    background:linear-gradient(135deg,var(--panel2),var(--panel));border:1px solid var(--line2);
+    border-radius:18px;padding:22px 26px;margin-bottom:22px}
+  @media(max-width:640px){.warhero{grid-template-columns:1fr;text-align:center;justify-items:center}}
+  .gauge{position:relative;width:150px;height:150px;flex:0 0 auto}
+  .gauge svg{transform:rotate(-90deg)}
+  .gauge .gv{position:absolute;inset:0;display:grid;place-content:center;text-align:center}
+  .gauge .gv .p{font-size:32px;font-weight:900;line-height:1;font-variant-numeric:tabular-nums}
+  .gauge .gv .s{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-top:4px;font-weight:700}
+  .warhead .k{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:800;margin-bottom:6px}
+  .warhead h3{margin:0 0 10px;font-size:20px;font-weight:800;line-height:1.25}
+  .warhead .mini{display:flex;gap:22px;flex-wrap:wrap}
+  .warhead .mini .m .n{font-size:20px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1}
+  .warhead .mini .m .t{font-size:11px;color:var(--muted);margin-top:3px}
+  .fsbtn{background:var(--panel);border:1px solid var(--line2);color:var(--ink);border-radius:10px;
+    padding:9px 15px;font-weight:600;display:flex;gap:8px;align-items:center;white-space:nowrap}
+  .fsbtn:hover{border-color:var(--cyan)}
+  .fsbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2}
+
+  .inc{display:flex;align-items:center;gap:13px;background:var(--panel);border:1px solid var(--red);
+    border-left-width:4px;border-radius:12px;padding:13px 16px;margin-bottom:10px}
+  .inc.acked{border-color:var(--amber);border-left-color:var(--amber);opacity:.9}
+  .inc .beat{width:11px;height:11px;border-radius:50%;background:var(--red);flex:0 0 auto;
+    box-shadow:0 0 0 0 rgba(242,85,90,.6);animation:beat 1.4s infinite}
+  .inc.acked .beat{background:var(--amber);animation:none}
+  @keyframes beat{0%{box-shadow:0 0 0 0 rgba(242,85,90,.55)}70%{box-shadow:0 0 0 10px rgba(242,85,90,0)}100%{box-shadow:0 0 0 0 rgba(242,85,90,0)}}
+  .inc .ib{flex:1}
+  .inc .ib b{font-size:14.5px}
+  .inc .ib p{margin:2px 0 0;font-size:12px;color:var(--muted)}
+  .inc .esc{font-size:10px;font-weight:900;letter-spacing:.05em;padding:3px 8px;border-radius:7px;
+    border:1px solid var(--red);color:var(--red);background:#f2555a22}
+  .inc .ack{background:var(--red);color:#fff;border:none;border-radius:10px;padding:9px 15px;font-weight:800;white-space:nowrap}
+  .inc.acked .ackedlbl{color:var(--amber);font-weight:800;font-size:12.5px;white-space:nowrap}
+
+  .slarow .ub{display:flex;align-items:center;gap:9px}
+  .slarow .updot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+
+  .feed{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .feed .fi{display:flex;gap:12px;align-items:flex-start;padding:11px 16px;border-bottom:1px solid var(--line)}
+  .feed .fi:last-child{border-bottom:none}
+  .feed .fi .ico{width:26px;height:26px;border-radius:8px;flex:0 0 auto;display:grid;place-items:center;font-size:13px;background:var(--bg2)}
+  .feed .fi .tx{flex:1;font-size:13px;line-height:1.35}
+  .feed .fi .tx .who{font-weight:700}
+  .feed .fi .tx .det{color:var(--muted);font-size:12px}
+  .feed .fi .ago{color:var(--muted2);font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  #app:fullscreen{background:var(--bg)} #app:-webkit-full-screen{background:var(--bg)}
+
   table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);
     border-radius:14px;overflow:hidden}
   thead th{text-align:left;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);
@@ -336,6 +384,7 @@ function toast(msg,bad){ const t=document.createElement('div'); t.className='toa
 // ---------- views ----------
 const VIEWS = [
   {id:'brief', title:'Centro', sub:'Copiloto que actúa + parte de tu flota', icon:'<path d="M12 3a5 5 0 0 0-5 5c0 2 1 3 1 5h8c0-2 1-3 1-5a5 5 0 0 0-5-5zM9 20h6M10 22h4"/>', render:renderBrief},
+  {id:'war', title:'Sala de Guerra', sub:'Centro de operaciones en vivo · disponibilidad, incidentes on-call y SLA', icon:'<path d="M12 2v4M12 18v4M2 12h4M18 12h4M12 12l6-3M5 19l7-7"/><circle cx="12" cy="12" r="3"/>', render:renderWarRoom},
   {id:'sites', title:'Sedes', sub:'Todas tus redes/sedes en vivo', icon:'<path d="M4 21V8l8-5 8 5v13M9 21v-6h6v6"/>', render:renderSites},
   {id:'threats', title:'Amenazas', sub:'Correlacionadas entre sedes', icon:'<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/>', render:renderThreats},
   {id:'policy', title:'Políticas', sub:'El estándar de tu organización y su cumplimiento', icon:'<path d="M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>', render:renderPolicy},
@@ -554,6 +603,130 @@ async function renderThreats(c){
       ${x.recommendation?`<div class="reco">💡 ${esc(x.recommendation)}</div>`:''}</div>`;
   });
   c.innerHTML=h;
+}
+
+/* ============ SALA DE GUERRA (NOC en vivo) ============ */
+function fmtDur(s){ s=Math.max(0,Math.floor(+s||0));
+  const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+  if(d) return `${d}d ${h}h`; if(h) return `${h}h ${m}m`; if(m) return `${m}m`; return `${s}s`; }
+function fmtAgo(iso){ if(!iso) return ''; const t=Date.parse(iso); if(isNaN(t)) return '';
+  const s=Math.max(0,Math.floor((Date.now()-t)/1000));
+  if(s<60) return 'hace '+s+'s'; if(s<3600) return 'hace '+Math.floor(s/60)+'m';
+  if(s<86400) return 'hace '+Math.floor(s/3600)+'h'; return 'hace '+Math.floor(s/86400)+'d'; }
+function gauge(pct,col){ pct=Math.max(0,Math.min(100,+pct||0)); const r=64,C=2*Math.PI*r;
+  const off=C*(1-pct/100);
+  return `<div class="gauge"><svg width="150" height="150" viewBox="0 0 150 150">
+    <circle cx="75" cy="75" r="${r}" fill="none" stroke="var(--line2)" stroke-width="12"/>
+    <circle cx="75" cy="75" r="${r}" fill="none" stroke="${col}" stroke-width="12" stroke-linecap="round"
+      stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/>
+  </svg><div class="gv"><div class="p" style="color:${col}">${pct}%</div><div class="s">Disponible</div></div></div>`; }
+const pctColor=p=>p>=99?'var(--green)':p>=95?'var(--cyan)':p>=90?'var(--amber)':'var(--red)';
+
+const AUDIT_ICON={block:'🚫',unblock:'✅',trust:'🛡️',incident_ack:'📟','fleet:block':'🚫','fleet:unblock':'✅','fleet:trust':'🛡️','fleet:policy':'📋'};
+function auditVerb(a){ return ({block:'bloqueó',unblock:'desbloqueó',trust:'marcó de confianza',incident_ack:'confirmó incidente',
+  'fleet:block':'bloqueó en la flota','fleet:unblock':'desbloqueó en la flota','fleet:trust':'confió en la flota','fleet:policy':'actualizó la política'}[a])||a; }
+
+async function renderWarRoom(c){
+  const R = await Promise.allSettled([
+    api('/v1/availability'), api('/v1/incidents'), api('/v1/sla?days=30'),
+    api('/v1/insights'), api('/v1/audit?limit=40'),
+  ]);
+  const av = R[0].status==='fulfilled'?R[0].value:null;
+  const inc = R[1].status==='fulfilled'?R[1].value:{incidents:[]};
+  const sla = R[2].status==='fulfilled'?R[2].value:null;
+  const ins = R[3].status==='fulfilled'?R[3].value:{roaming_unknowns:[]};
+  const aud = R[4].status==='fulfilled'?R[4].value:{entries:[]};
+
+  const openInc=(inc.incidents||[]).filter(x=>!x.acked).length;
+  _nav.war=openInc||0; buildNav();
+
+  const avs=(av&&av.summary)||{}; const pct=avs.availability_pct!=null?avs.availability_pct:100;
+  const col=pctColor(pct);
+  const up30 = sla&&sla.overall?sla.overall.uptime_pct:null;
+
+  // ── hero ──
+  let h=`<div class="warhero">
+    ${gauge(pct,col)}
+    <div class="warhead">
+      <div class="k">Centro de operaciones · en vivo</div>
+      <h3>${openInc?`${openInc} incidente(s) abierto(s) · atención`:'Flota estable · sin incidentes abiertos'}</h3>
+      <div class="mini">
+        <div class="m"><div class="n" style="color:${avs.sites_online<avs.sites?'var(--red)':'var(--green)'}">${avs.sites_online||0}/${avs.sites||0}</div><div class="t">Sedes en línea</div></div>
+        <div class="m"><div class="n" style="color:${avs.criticals_down?'var(--red)':'var(--ink)'}">${avs.criticals_up||0}/${avs.criticals_total||0}</div><div class="t">Críticos arriba</div></div>
+        <div class="m"><div class="n" style="color:${openInc?'var(--red)':'var(--green)'}">${openInc}</div><div class="t">Incidentes abiertos</div></div>
+        ${up30!=null?`<div class="m"><div class="n" style="color:${pctColor(up30)}">${up30}%</div><div class="t">Uptime 30 días</div></div>`:''}
+      </div>
+    </div>
+    <button class="fsbtn" id="fsBtn"><svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg> Pantalla completa</button>
+  </div>`;
+
+  // ── incidentes on-call ──
+  h+=`<div class="section-t">Incidentes on-call${openInc?` <span class="cnt">${openInc}</span>`:''}</div>`;
+  const incs=inc.incidents||[];
+  if(!incs.length){ h+=`<div class="empty">Sin incidentes abiertos — ninguna sede caída ahora mismo. 🟢</div>`; }
+  else{
+    incs.forEach(x=>{ const esc_=esc(x.site_name); const acked=x.acked;
+      h+=`<div class="inc ${acked?'acked':''}" data-site="${esc(x.site_id)}">
+        <span class="beat"></span>
+        <div class="ib"><b>${esc_}</b><p>Caída ${fmtAgo(x.down_since)} · lleva ${fmtDur(x.down_seconds)} fuera${x.escalation_level?` · escalado nivel ${x.escalation_level}`:''}</p></div>
+        ${x.escalation_level?`<span class="esc">ESC ${x.escalation_level}</span>`:''}
+        ${acked?`<span class="ackedlbl">✓ Enterado</span>`:`<button class="ack" data-site="${esc(x.site_id)}">Enterado</button>`}
+      </div>`;
+    });
+  }
+
+  // ── SLA / uptime 30 días ──
+  if(sla && (sla.sites||[]).length){
+    h+=`<div class="section-t">Uptime auditable · 30 días <span class="cnt">${sla.overall.uptime_pct}% global</span></div>`;
+    const rows=sla.sites.map(s=>{ const uc=pctColor(s.uptime_pct);
+      return `<tr class="slarow">
+        <td><b>${esc(s.site_name)}</b></td>
+        <td><div class="ub"><span class="updot" style="background:${uc}"></span><span class="num" style="color:${uc};font-weight:800">${s.uptime_pct}%</span></div></td>
+        <td class="num" style="color:${s.incidents?'var(--amber)':'var(--muted)'}">${s.incidents||0}</td>
+        <td class="num muted">${s.mttr_seconds?fmtDur(s.mttr_seconds):'—'}</td>
+        <td class="num muted">${s.downtime_seconds?fmtDur(s.downtime_seconds):'0s'}</td></tr>`;
+    }).join('');
+    h+=`<table><thead><tr><th>Sede</th><th>Uptime</th><th>Incidentes</th><th>MTTR</th><th>Caída total</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="muted" style="font-size:11.5px;margin-top:10px">Prueba auditable de disponibilidad de los últimos 30 días — Fing no da esto. MTTR = tiempo medio de recuperación.</p>`;
+  }
+
+  // ── intruso itinerante (multi-sede) ──
+  const roam=ins.roaming_unknowns||[];
+  if(roam.length){
+    h+=`<div class="section-t">Intruso itinerante <span class="cnt">${roam.length}</span></div>`;
+    roam.forEach(r=>{ h+=`<div class="atn"><div class="bar" style="background:var(--red)"></div>
+      <div><b>${esc(r.name)}</b> <span class="muted">${esc(r.mac)}</span>
+      <p>Equipo NO confiable visto en ${r.site_count} sedes: ${(r.sites||[]).map(esc).join(', ')}</p></div></div>`; });
+    h+=`<p class="muted" style="font-size:11.5px;margin:2px 0 0">La misma MAC sin clasificar apareciendo en varias sedes — solo se detecta con visión multi-sede.</p>`;
+  }
+
+  // ── feed de operaciones ──
+  const ents=aud.entries||[];
+  if(ents.length){
+    h+=`<div class="section-t">Feed de operaciones</div><div class="feed">`;
+    ents.forEach(e=>{ h+=`<div class="fi"><div class="ico">${AUDIT_ICON[e.action]||'•'}</div>
+      <div class="tx"><span class="who">${esc(e.actor||'?')}</span> ${esc(auditVerb(e.action))}${e.target&&e.target!=='-'?` <span class="det">${esc(e.target)}</span>`:''}
+      ${e.detail?`<div class="det">${esc(e.detail)}</div>`:''}</div>
+      <div class="ago">${fmtAgo(e.at)}</div></div>`; });
+    h+=`</div>`;
+  }
+
+  c.innerHTML=h;
+
+  // fullscreen
+  const fb=document.getElementById('fsBtn');
+  if(fb) fb.onclick=()=>{ const el=document.getElementById('app');
+    if(!document.fullscreenElement){ (el.requestFullscreen||el.webkitRequestFullscreen||(()=>{})).call(el); }
+    else{ (document.exitFullscreen||document.webkitExitFullscreen||(()=>{})).call(document); } };
+
+  // ack incidentes
+  c.querySelectorAll('.ack').forEach(b=>b.onclick=async()=>{
+    const sid=b.dataset.site; b.disabled=true; b.textContent='…';
+    try{ await apiPost(`/v1/incidents/${encodeURIComponent(sid)}/ack`,{});
+      toast('Incidente confirmado'); load(); }
+    catch(e){ toast(e.status===403?'Sede fuera de tu alcance':(e.message||'No se pudo'),true);
+      b.disabled=false; b.textContent='Enterado'; }
+  });
 }
 
 /* ============ POLÍTICAS DE FLOTA (estándar + desvío) ============ */
