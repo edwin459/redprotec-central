@@ -2450,6 +2450,167 @@ def fleet_act(body: FleetActIn, p: Principal = Depends(principal)) -> dict:
     return {"ok": True, "queued_count": queued, "results": results}
 
 
+# ── Políticas de Flota (frente C) ────────────────────────────────────────────
+# Defines UNA política (el estándar de la organización) y el relay evalúa CADA
+# sede contra ella y reporta el DESVÍO (drift): qué sedes no cumplen y por qué.
+# Gobernanza multi-sede que Fing no tiene. Puro: evalúa lo que las sedes ya
+# reportan; no aplica nada en el agente (eso ya lo cubre el Copiloto de Flota).
+_DEFAULT_FLEET_POLICY: dict = {
+    "require_protection": True,      # protección activa (no «unknown/off»)
+    "max_unmanaged": 0,              # equipos sin gestionar permitidos
+    "require_remote_admin": False,   # admin remota encendida
+    "require_no_criticals_down": True,  # sin activos críticos caídos
+}
+_UNPROTECTED_MODES = frozenset({"", "unknown", "off", "none", "disabled"})
+
+
+def _fleet_policy_key(org: str) -> str:
+    return f"fleetpolicy::{org}"
+
+
+def _load_fleet_policy(org: str) -> dict:
+    raw = store.kv_get(_fleet_policy_key(org))
+    if raw:
+        try:
+            p = json.loads(raw)
+            if isinstance(p, dict):
+                return {**_DEFAULT_FLEET_POLICY, **p}
+        except (ValueError, TypeError):
+            pass
+    return dict(_DEFAULT_FLEET_POLICY)
+
+
+def _evaluate_site_policy(policy: dict, rec: dict) -> list[str]:
+    """Lista de incumplimientos de una sede contra la política. PURA."""
+    summ = rec.get("summary") or {}
+    violations: list[str] = []
+    if policy.get("require_protection"):
+        mode = str(summ.get("protection_mode") or "unknown").lower()
+        if mode in _UNPROTECTED_MODES:
+            violations.append("protección desactivada")
+    unmanaged = sum(
+        1 for d in (rec.get("devices") or [])
+        if (d.get("trust") or "unknown") == "unknown"
+    )
+    maxu = int(policy.get("max_unmanaged", 0) or 0)
+    if unmanaged > maxu:
+        violations.append(f"{unmanaged} equipo(s) sin gestionar (máx {maxu})")
+    if policy.get("require_remote_admin") and not rec.get("remote_admin"):
+        violations.append("admin remota apagada")
+    if policy.get("require_no_criticals_down") and int(summ.get("criticals_down", 0) or 0) > 0:
+        violations.append(f"{int(summ['criticals_down'])} activo(s) crítico(s) caído(s)")
+    return violations
+
+
+class FleetPolicyIn(BaseModel):
+    require_protection: bool = True
+    max_unmanaged: int = Field(default=0, ge=0, le=100000)
+    require_remote_admin: bool = False
+    require_no_criticals_down: bool = True
+
+
+@app.get("/v1/fleet/policy")
+def get_fleet_policy(p: Principal = Depends(principal)) -> dict:
+    """Devuelve la política de flota + el cumplimiento por sede (quién cumple y
+    quién se desvió, con motivos). Filtra al alcance de quien llama."""
+    policy = _load_fleet_policy(p.org_token)
+    now = _now()
+    sites: list[dict] = []
+    compliant = 0
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        v = _evaluate_site_policy(policy, rec)
+        ok = not v
+        if ok:
+            compliant += 1
+        so = _site_out(site_id, rec, now)
+        sites.append({
+            "site_id": site_id, "site_name": rec["site_name"],
+            "online": so["online"], "compliant": ok, "violations": v,
+        })
+    sites.sort(key=lambda s: (1 if s["compliant"] else 0, s["site_name"].lower()))
+    return {
+        "policy": policy,
+        "sites": sites,
+        "compliant_count": compliant,
+        "drift_count": len(sites) - compliant,
+        "role": p.role,
+        "can_edit": p.is_master,
+    }
+
+
+@app.put("/v1/fleet/policy")
+def put_fleet_policy(body: FleetPolicyIn, p: Principal = Depends(require_master)) -> dict:
+    """Define/actualiza la política de flota (solo el token maestro/dueño)."""
+    policy = body.model_dump()
+    store.kv_set(_fleet_policy_key(p.org_token), json.dumps(policy))
+    _audit(p, "fleet:policy", "-", "Actualizó la política de flota")
+    return {"ok": True, "policy": policy}
+
+
+# ── Consumo y costos por sede (frente D — chargeback) ────────────────────────
+# Agrega el consumo EN VIVO por sede (suma de bytes/seg que ya reportan los
+# equipos), su PARTICIPACIÓN (%) en el total de la flota, su mayor consumidor y
+# una estimación mensual (a ritmo actual, claramente etiquetada). Con un precio
+# por GB opcional, calcula un costo estimado → reparto del gasto entre sedes.
+# Fing no mide el consumo por-equipo así. Relay-only; honesto (en vivo/estimado,
+# no medición histórica).
+_SECONDS_PER_MONTH = 2_592_000  # 30 días
+
+
+@app.get("/v1/fleet/consumption")
+def fleet_consumption(
+    price_per_gb: float | None = None, p: Principal = Depends(principal),
+) -> dict:
+    """Consumo por sede: throughput en vivo, participación %, mayor consumidor y
+    estimación mensual (opcionalmente en costo con `price_per_gb`)."""
+    now = _now()
+    rows: list[dict] = []
+    fleet_bps = 0.0
+    for site_id, rec in store.list_sites(p.org_token):
+        if not p.sees_site(site_id):
+            continue
+        total = 0.0
+        count = 0
+        estimated = False
+        top: dict | None = None
+        for d in (rec.get("devices") or []):
+            bps = d.get("bytes_per_sec")
+            if bps is None:
+                continue
+            bps = float(bps)
+            total += bps
+            count += 1
+            if d.get("consumption_estimated"):
+                estimated = True
+            if top is None or bps > top["bytes_per_sec"]:
+                top = {"name": d.get("name") or d.get("mac") or "—",
+                       "bytes_per_sec": bps}
+        fleet_bps += total
+        so = _site_out(site_id, rec, now)
+        rows.append({
+            "site_id": site_id, "site_name": rec["site_name"],
+            "online": so["online"], "bytes_per_sec": total,
+            "device_count": count, "top": top, "estimated": estimated,
+        })
+    for r in rows:
+        r["share_pct"] = (
+            round(100.0 * r["bytes_per_sec"] / fleet_bps, 1) if fleet_bps > 0 else 0.0
+        )
+        monthly_gb = r["bytes_per_sec"] * _SECONDS_PER_MONTH / 1e9
+        r["monthly_gb_est"] = round(monthly_gb, 1)
+        if price_per_gb is not None and price_per_gb >= 0:
+            r["monthly_cost_est"] = round(monthly_gb * price_per_gb, 2)
+    rows.sort(key=lambda r: -r["bytes_per_sec"])
+    return {
+        "sites": rows,
+        "fleet_bytes_per_sec": fleet_bps,
+        "price_per_gb": price_per_gb,
+        "generated_at": now.isoformat(),
+    }
+
+
 _GRADE_BANDS = [(90, "A"), (75, "B"), (60, "C"), (40, "D"), (0, "F")]
 
 

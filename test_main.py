@@ -896,6 +896,121 @@ class FleetCopilotTests(unittest.TestCase):
         self.assertEqual(byid["medellin"]["reason"], "fuera de alcance")
 
 
+class FleetPolicyTests(unittest.TestCase):
+    """Políticas de Flota (/v1/fleet/policy): política + drift por sede."""
+
+    def setUp(self):
+        main._STORE.clear()
+        main._ACCESS.clear()
+        if hasattr(main.store, "_kv"):
+            main.store._kv.clear()
+        self.org = "org-policy-token-5555"
+
+    def _seed(self, site_id, name, summary=None, *, devices=None, remote_admin=True):
+        main._STORE.setdefault(self.org, {})[site_id] = {
+            "site_name": name,
+            "summary": {**main.SiteSummary().model_dump(), **(summary or {})},
+            "devices": devices or [],
+            "remote_admin": remote_admin,
+            "updated_at": main._now(),
+        }
+
+    def _get(self, token=None):
+        return main.get_fleet_policy(p=main._resolve_principal(token or self.org))
+
+    def test_default_policy_flags_drift(self):
+        # Sede sana (protección + sin desconocidos) vs sede con desvíos.
+        self._seed("ok", "Sana", {"protection_mode": "guardian"},
+                   devices=[{"mac": "AA", "trust": "trusted"}])
+        self._seed("bad", "Riesgo", {"protection_mode": "unknown",
+                   "criticals_down": 1},
+                   devices=[{"mac": "BB", "trust": "unknown"}])
+        out = self._get()
+        by = {s["site_id"]: s for s in out["sites"]}
+        self.assertTrue(by["ok"]["compliant"])
+        self.assertFalse(by["bad"]["compliant"])
+        self.assertEqual(out["compliant_count"], 1)
+        self.assertEqual(out["drift_count"], 1)
+        # el motivo de protección y el de sin-gestionar aparecen.
+        joined = " ".join(by["bad"]["violations"]).lower()
+        self.assertIn("protección", joined)
+        self.assertIn("sin gestionar", joined)
+
+    def test_put_policy_changes_evaluation(self):
+        self._seed("s", "S", {"protection_mode": "unknown"})
+        # Con la política por defecto (require_protection) → desvío.
+        self.assertEqual(self._get()["drift_count"], 1)
+        # Relajamos la política: ya no exige protección → cumple.
+        main.put_fleet_policy(
+            main.FleetPolicyIn(require_protection=False, max_unmanaged=0,
+                               require_remote_admin=False,
+                               require_no_criticals_down=True),
+            p=main._resolve_principal(self.org))
+        self.assertEqual(self._get()["drift_count"], 0)
+
+    def test_policy_scope_filters(self):
+        self._seed("bogota", "Bogotá", {"protection_mode": "unknown"})
+        self._seed("medellin", "Medellín", {"protection_mode": "unknown"})
+        main._ACCESS[self.org] = {
+            "u": {"name": "Ana", "role": "auditor", "sites": ["bogota"]}}
+        out = self._get("u")
+        self.assertEqual(len(out["sites"]), 1)
+        self.assertFalse(out["can_edit"])  # auditor no es maestro
+
+
+class FleetConsumptionTests(unittest.TestCase):
+    """Consumo/costos por sede (/v1/fleet/consumption): throughput + share + $."""
+
+    def setUp(self):
+        main._STORE.clear()
+        main._ACCESS.clear()
+        self.org = "org-consumo-token-3333"
+
+    def _seed(self, site_id, name, devices):
+        main._STORE.setdefault(self.org, {})[site_id] = {
+            "site_name": name,
+            "summary": main.SiteSummary().model_dump(),
+            "devices": devices,
+            "remote_admin": True,
+            "updated_at": main._now(),
+        }
+
+    def test_aggregates_share_and_ranks(self):
+        self._seed("a", "A", [
+            {"mac": "A1", "name": "TV", "bytes_per_sec": 3_000_000.0},
+            {"mac": "A2", "name": "PC", "bytes_per_sec": 1_000_000.0},
+        ])
+        self._seed("b", "B", [
+            {"mac": "B1", "name": "Caja", "bytes_per_sec": 1_000_000.0},
+        ])
+        out = main.fleet_consumption(p=main._resolve_principal(self.org))
+        # Total flota = 5 MB/s; A=4 (80%), B=1 (20%); ordenado desc (A primero).
+        self.assertEqual(out["sites"][0]["site_id"], "a")
+        self.assertEqual(out["sites"][0]["share_pct"], 80.0)
+        self.assertEqual(out["sites"][1]["share_pct"], 20.0)
+        # mayor consumidor de A = TV.
+        self.assertEqual(out["sites"][0]["top"]["name"], "TV")
+        self.assertEqual(out["fleet_bytes_per_sec"], 5_000_000.0)
+
+    def test_cost_estimate_with_price(self):
+        self._seed("a", "A", [
+            {"mac": "A1", "name": "TV", "bytes_per_sec": 1_000_000.0}])
+        out = main.fleet_consumption(
+            price_per_gb=2.0, p=main._resolve_principal(self.org))
+        r = out["sites"][0]
+        self.assertGreater(r["monthly_gb_est"], 0)
+        self.assertAlmostEqual(
+            r["monthly_cost_est"], round(r["monthly_gb_est"] * 2.0, 2), places=2)
+
+    def test_devices_without_consumption_ignored(self):
+        self._seed("a", "A", [
+            {"mac": "A1", "name": "Offline", "bytes_per_sec": None},
+            {"mac": "A2", "name": "Activo", "bytes_per_sec": 500_000.0}])
+        out = main.fleet_consumption(p=main._resolve_principal(self.org))
+        self.assertEqual(out["sites"][0]["device_count"], 1)
+        self.assertEqual(out["sites"][0]["bytes_per_sec"], 500_000.0)
+
+
 class ComplianceAndAvailabilityTests(unittest.TestCase):
     """Postura de Cumplimiento (/v1/compliance) y Disponibilidad (/v1/availability)."""
 
