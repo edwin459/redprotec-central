@@ -60,6 +60,11 @@
   .navi.active{background:rgba(34,211,238,.12);color:var(--cyan)}
   .navi .nb{margin-left:auto;font-size:10.5px;font-weight:900;background:var(--red);color:#160406;
     border-radius:20px;padding:1px 7px;min-width:18px;text-align:center}
+  .menutoggle{display:none;background:var(--panel);border:1px solid var(--line2);color:var(--ink);
+    border-radius:9px;width:42px;height:38px;align-items:center;justify-content:center;margin-left:auto}
+  .menutoggle svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2}
+  .menutoggle:hover{border-color:var(--cyan)}
+  .menutoggle.on{border-color:var(--cyan);color:var(--cyan)}
   .side .foot{padding:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
   .side .foot .acct{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:8px}
   .logout{width:100%;background:none;border:1px solid var(--line2);color:var(--muted);border-radius:9px;padding:9px;font-weight:600}
@@ -248,12 +253,16 @@
     #app{display:block;min-width:0}
     .side{position:sticky;top:0;height:auto;width:100%;max-width:100%;min-width:0;
       flex-direction:column;z-index:30;border-right:none;border-bottom:1px solid var(--line);
-      background:rgba(11,17,27,.96);backdrop-filter:blur(8px);overflow:hidden}
-    .side .top{padding:12px 16px}
-    nav{flex-direction:row;overflow-x:auto;-webkit-overflow-scrolling:touch;
-      padding:0 10px 10px;gap:6px;flex:0 0 auto;min-width:0;max-width:100%;scrollbar-width:none}
-    nav::-webkit-scrollbar{display:none}
-    .navi{flex:0 0 auto;padding:8px 13px;white-space:nowrap}
+      background:rgba(11,17,27,.96);backdrop-filter:blur(8px)}
+    .side .top{padding:12px 16px;align-items:center}
+    .menutoggle{display:flex}
+    /* menú = desplegable bajo el encabezado (no más deslizar) */
+    nav{position:absolute;top:100%;left:0;right:0;display:none;flex-direction:column;
+      padding:8px;gap:3px;background:var(--bg2);border-bottom:1px solid var(--line);
+      box-shadow:var(--shadow);z-index:40}
+    nav.open{display:flex}
+    .navi{width:100%;padding:13px 14px;white-space:nowrap}
+    .navi .nb{margin-left:auto}
     .side .foot{display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid var(--line)}
     .side .foot .acct{margin-bottom:0;flex:1;font-size:11px}
     .logout{width:auto;padding:7px 13px;flex:0 0 auto}
@@ -320,7 +329,8 @@
 <!-- ==================== APP ==================== -->
 <div id="app" class="hidden">
   <aside class="side">
-    <div class="top"><span id="logo-side"></span><span class="wm"><span class="g">RED</span>PROTEC</span></div>
+    <div class="top"><span id="logo-side"></span><span class="wm"><span class="g">RED</span>PROTEC</span>
+      <button class="menutoggle" id="menuBtn" aria-label="Menú"><svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button></div>
     <nav id="nav"></nav>
     <div class="foot">
       <div class="acct" id="acct">—</div>
@@ -436,12 +446,12 @@ function buildNav(){
     nav.appendChild(b);
     if(v.id===current) activeBtn=b;
   });
-  // en móvil (nav horizontal) centra el ítem activo a la vista
-  if(activeBtn && window.innerWidth<=820){
-    try{ activeBtn.scrollIntoView({block:'nearest',inline:'center'}); }catch(e){}
-  }
 }
-function go(id){ current=id; _copilotPending=false; buildNav(); const v=VIEWS.find(x=>x.id===id);
+function closeMenu(){ const n=document.getElementById('nav'); if(n) n.classList.remove('open');
+  const b=document.getElementById('menuBtn'); if(b) b.classList.remove('on'); }
+function toggleMenu(){ const n=document.getElementById('nav'); const b=document.getElementById('menuBtn');
+  const open=!n.classList.contains('open'); n.classList.toggle('open',open); if(b) b.classList.toggle('on',open); }
+function go(id){ current=id; _copilotPending=false; buildNav(); closeMenu(); const v=VIEWS.find(x=>x.id===id);
   document.getElementById('viewTitle').textContent=v.title;
   document.getElementById('viewSub').textContent=v.sub;
   load(); }
@@ -658,8 +668,27 @@ function gauge(pct,col){ pct=Math.max(0,Math.min(100,+pct||0)); const r=64,C=2*M
 const pctColor=p=>p>=99?'var(--green)':p>=95?'var(--cyan)':p>=90?'var(--amber)':'var(--red)';
 
 const AUDIT_ICON={block:'🚫',unblock:'✅',trust:'🛡️',incident_ack:'📟','fleet:block':'🚫','fleet:unblock':'✅','fleet:trust':'🛡️','fleet:policy':'📋'};
-function auditVerb(a){ return ({block:'bloqueó',unblock:'desbloqueó',trust:'marcó de confianza',incident_ack:'confirmó incidente',
-  'fleet:block':'bloqueó en la flota','fleet:unblock':'desbloqueó en la flota','fleet:trust':'confió en la flota','fleet:policy':'actualizó la política'}[a])||a; }
+const AUDIT_VERB={block:'bloqueó',unblock:'desbloqueó',trust:'marcó de confianza',incident_ack:'confirmó el incidente',
+  'fleet:block':'bloqueó','fleet:unblock':'desbloqueó','fleet:trust':'marcó de confianza','fleet:policy':'actualizó la política de la flota'};
+function auditVerb(a){ return AUDIT_VERB[a]||String(a||'').replace(/[:_]/g,' '); }
+function friendlyActor(a){ const k=String(a||'').toLowerCase();
+  return {owner:'El dueño',master:'El dueño',admin:'Un administrador',manager:'Un gerente',auditor:'Un auditor',
+    partner:'El socio',viewer:'Un observador','?':'Alguien','':'Alguien'}[k] || (a.charAt(0).toUpperCase()+a.slice(1)); }
+const _isUuid=s=>/^[0-9a-f]{32}$/i.test(String(s||''))||/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(String(s||''));
+const _isMac=s=>/^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(String(s||''));
+// Describe una entrada de bitácora en lenguaje natural (sin códigos crudos).
+function describeAudit(e, siteNames){
+  const role=friendlyActor(e.actor), a=String(e.action||''), verb=auditVerb(a);
+  let tgt='';
+  const t=e.target;
+  if(t && t!=='-'){
+    if(_isUuid(t)) tgt = siteNames[t] ? ' en «'+siteNames[t]+'»' : ' en una sede';
+    else if(_isMac(t)) tgt = ' un equipo';
+    else tgt = ' «'+t+'»';
+  }
+  let extra=''; const m=/en\s+(\d+)\s+sede/i.exec(e.detail||''); if(m) extra=' · en '+m[1]+' sede(s)';
+  return {icon:AUDIT_ICON[a]||'•', html:`<span class="who">${esc(role)}</span> ${esc(verb)}${esc(tgt)}${esc(extra)}`};
+}
 
 async function renderWarRoom(c){
   const R = await Promise.allSettled([
@@ -735,14 +764,22 @@ async function renderWarRoom(c){
     h+=`<p class="muted" style="font-size:11.5px;margin:2px 0 0">La misma MAC sin clasificar apareciendo en varias sedes — solo se detecta con visión multi-sede.</p>`;
   }
 
-  // ── feed de operaciones ──
+  // ── feed de operaciones (lenguaje humano, sin códigos, repetidos agrupados) ──
   const ents=aud.entries||[];
   if(ents.length){
+    // mapa id-de-sede → nombre (de disponibilidad + incidentes) para no mostrar UUID
+    const siteNames={};
+    (av&&av.sites||[]).forEach(s=>{ if(s.site_id) siteNames[s.site_id]=s.site_name; });
+    (inc.incidents||[]).forEach(s=>{ if(s.site_id) siteNames[s.site_id]=s.site_name; });
+    // agrupar entradas consecutivas idénticas (p. ej. «actualizó la política» ×5)
+    const items=[];
+    ents.forEach(e=>{ const d=describeAudit(e,siteNames); const last=items[items.length-1];
+      if(last && last.html===d.html){ last.count++; }
+      else items.push({icon:d.icon, html:d.html, at:e.at, count:1}); });
     h+=`<div class="section-t">Feed de operaciones</div><div class="feed">`;
-    ents.forEach(e=>{ h+=`<div class="fi"><div class="ico">${AUDIT_ICON[e.action]||'•'}</div>
-      <div class="tx"><span class="who">${esc(e.actor||'?')}</span> ${esc(auditVerb(e.action))}${e.target&&e.target!=='-'?` <span class="det">${esc(e.target)}</span>`:''}
-      ${e.detail?`<div class="det">${esc(e.detail)}</div>`:''}</div>
-      <div class="ago">${fmtAgo(e.at)}</div></div>`; });
+    items.forEach(it=>{ h+=`<div class="fi"><div class="ico">${it.icon}</div>
+      <div class="tx">${it.html}${it.count>1?` <span class="det">· ${it.count} veces</span>`:''}</div>
+      <div class="ago">${fmtAgo(it.at)}</div></div>`; });
     h+=`</div>`;
   }
 
@@ -883,6 +920,10 @@ function logout(){ store.t=null; store.r=null; if(_autoTimer){clearInterval(_aut
 document.getElementById('logout').onclick=logout;
 document.getElementById('refreshBtn').onclick=load;
 document.getElementById('autoBtn').onclick=toggleAuto;
+document.getElementById('menuBtn').onclick=(e)=>{ e.stopPropagation(); toggleMenu(); };
+// cerrar el menú al tocar fuera
+document.addEventListener('click',(e)=>{ const n=document.getElementById('nav');
+  if(n&&n.classList.contains('open')&&!e.target.closest('.side')) closeMenu(); });
 
 document.getElementById('loginForm').addEventListener('submit', async(e)=>{
   e.preventDefault();
