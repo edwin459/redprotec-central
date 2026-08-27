@@ -12,6 +12,9 @@ COPY *.py ./
 # Panel WEB (build de Flutter Web servido en /panel, mismo origen que la API).
 COPY panel_web ./panel_web
 
+# Consola WEB dedicada (dashboard de escritorio servido en /console).
+COPY console ./console
+
 # Fly.io / hosts inyectan PORT; por defecto 8080.
 ENV PORT=8080
 EXPOSE 8080

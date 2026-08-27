@@ -119,6 +119,13 @@ _PANEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_web
 if os.path.isdir(_PANEL_DIR):
     app.mount("/panel", StaticFiles(directory=_PANEL_DIR, html=True), name="panel")
 
+# CONSOLA WEB DEDICADA (de escritorio, hecha para navegador): dashboard propio que
+# consume la MISMA API del relay con el JWT de Supabase (mismo origen → sin CORS).
+# Es la consola "en serio" para dueños/MSP (mejor que la app estirada). En /console.
+_CONSOLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "console")
+if os.path.isdir(_CONSOLE_DIR):
+    app.mount("/console", StaticFiles(directory=_CONSOLE_DIR, html=True), name="console")
+
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
 # de auth (401/403) para frenar fuerza bruta del ADMIN_TOKEN o de tokens.
