@@ -686,6 +686,96 @@ class FleetThreatsTests(unittest.TestCase):
         self.assertEqual(roaming, [])
 
 
+class FleetBriefTests(unittest.TestCase):
+    """Cerebro de Flota (/v1/fleet/brief): relato + correlaciones + anti-spam."""
+
+    def setUp(self):
+        main._STORE.clear()
+        main._ACCESS.clear()
+        self.org = "org-fleet-token-9999"
+
+    def _seed(self, site_id, name, summary=None, *, devices=None, offline_secs=None):
+        upd = main._now()
+        if offline_secs:
+            upd = upd - timedelta(seconds=offline_secs)
+        main._STORE.setdefault(self.org, {})[site_id] = {
+            "site_name": name,
+            "summary": {**main.SiteSummary().model_dump(), **(summary or {})},
+            "devices": devices or [],
+            "remote_admin": False,
+            "updated_at": upd,
+        }
+
+    def _brief(self):
+        return main.fleet_brief(p=main._resolve_principal(self.org))
+
+    def test_all_ok_headline(self):
+        self._seed("a", "A", {"devices_total": 3, "devices_online": 3})
+        self._seed("b", "B", {"devices_total": 2, "devices_online": 2})
+        out = self._brief()
+        self.assertEqual(out["attention"], [])
+        self.assertEqual(out["correlations"], [])
+        self.assertIn("orden", out["headline"])
+        self.assertEqual(out["stats"]["sites_total"], 2)
+        self.assertEqual(out["stats"]["sites_online"], 2)
+        self.assertEqual(out["stats"]["devices_total"], 5)
+
+    def test_regional_outage_correlation_and_antispam(self):
+        # 2 sedes offline → UNA correlación de corte regional, NO 2 items sueltos.
+        big_off = main.ONLINE_WINDOW_SECONDS + 60
+        self._seed("a", "A", offline_secs=big_off)
+        self._seed("b", "B", offline_secs=big_off)
+        self._seed("c", "C", {"devices_total": 1, "devices_online": 1})  # sana
+        out = self._brief()
+        reg = [c for c in out["correlations"] if c["type"] == "regional_outage"]
+        self.assertEqual(len(reg), 1)
+        self.assertEqual(len(reg[0]["sites"]), 2)
+        self.assertEqual(reg[0]["confidence"], "inferred")
+        # anti-spam: las 2 sedes offline NO se repiten en attention.
+        self.assertEqual(out["attention"], [])
+        self.assertIn("corte regional", out["headline"])
+
+    def test_offline_site_with_extra_problem_still_listed(self):
+        # Una sede offline que ADEMÁS tiene críticos caídos SÍ aparece en attention.
+        big_off = main.ONLINE_WINDOW_SECONDS + 60
+        self._seed("a", "A", {"criticals_down": 1}, offline_secs=big_off)
+        self._seed("b", "B", offline_secs=big_off)
+        out = self._brief()
+        att_ids = [a["site_id"] for a in out["attention"]]
+        self.assertIn("a", att_ids)      # tiene crítico caído → se lista
+        self.assertNotIn("b", att_ids)   # solo offline → cubierta por la correlación
+
+    def test_attention_ranks_and_reasons(self):
+        self._seed("crit", "Crit", {"criticals_down": 2, "devices_total": 5})
+        self._seed("warn", "Warn", devices=[{"mac": "ZZ", "trust": "unknown"}])
+        out = self._brief()
+        self.assertEqual(out["attention"][0]["site_id"], "crit")
+        self.assertEqual(out["attention"][0]["severity"], "critical")
+        warn = next(a for a in out["attention"] if a["site_id"] == "warn")
+        self.assertEqual(warn["severity"], "high")  # equipo sin gestionar
+
+    def test_roaming_threat_becomes_confirmed_correlation(self):
+        self._seed("a", "A", devices=[
+            {"mac": "11:22:33:44:55:66", "trust": "unknown", "online": True}])
+        self._seed("b", "B", devices=[
+            {"mac": "11:22:33:44:55:66", "trust": "unknown", "online": True}])
+        out = self._brief()
+        rc = [c for c in out["correlations"] if c["type"] == "roaming_unknown"]
+        self.assertEqual(len(rc), 1)
+        self.assertEqual(rc[0]["confidence"], "confirmed")
+        self.assertEqual(len(rc[0]["sites"]), 2)
+
+    def test_scope_limits_brief(self):
+        # Un auditor con alcance a una sola sede solo ve esa en el parte.
+        self._seed("bogota", "Bogotá", {"criticals_down": 1})
+        self._seed("medellin", "Medellín", {"alerts": 3})
+        main._ACCESS[self.org] = {
+            "u-bog": {"name": "Ana", "role": "auditor", "sites": ["bogota"]}}
+        out = main.fleet_brief(p=main._resolve_principal("u-bog"))
+        self.assertEqual(out["stats"]["sites_total"], 1)
+        self.assertEqual([a["site_id"] for a in out["attention"]], ["bogota"])
+
+
 class ComplianceAndAvailabilityTests(unittest.TestCase):
     """Postura de Cumplimiento (/v1/compliance) y Disponibilidad (/v1/availability)."""
 

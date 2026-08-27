@@ -1949,12 +1949,24 @@ def fleet_threats(p: Principal = Depends(principal)) -> dict:
     - `blocked` (baja): bloqueo activo (informativo).
     """
     now = _now()
-    # mac -> agregado entre sedes.
+    scoped = [
+        (site_id, rec) for site_id, rec in store.list_sites(p.org_token)
+        if p.sees_site(site_id)
+    ]
+    threats, summary = _compute_fleet_threats(scoped)
+    return {"threats": threats, "summary": summary, "generated_at": now.isoformat()}
+
+
+def _compute_fleet_threats(
+    scoped_sites: list[tuple[str, dict]],
+) -> tuple[list[dict], dict]:
+    """Núcleo PURO del Centro de Amenazas de Flota (reusado por `/v1/threats` y por
+    el Cerebro de Flota). Correlaciona el inventario de las sedes dadas (ya
+    filtradas por alcance) y clasifica amenazas que solo se ven con visión de
+    flota. No consulta el store ni el principal."""
     agg: dict[str, dict] = {}
     sites_seen: set[str] = set()
-    for site_id, rec in store.list_sites(p.org_token):
-        if not p.sees_site(site_id):
-            continue
+    for site_id, rec in scoped_sites:
         sites_seen.add(site_id)
         for d in (rec.get("devices") or []):
             mac = (d.get("mac") or "").upper()
@@ -2030,7 +2042,195 @@ def fleet_threats(p: Principal = Depends(principal)) -> dict:
                "total": len(threats), "sites": len(sites_seen)}
     for t in threats:
         summary[t["severity"]] = summary.get(t["severity"], 0) + 1
-    return {"threats": threats, "summary": summary, "generated_at": now.isoformat()}
+    return threats, summary
+
+
+# ── Cerebro de Flota (Fleet Brain) ───────────────────────────────────────────
+# El gran diferenciador multi-sede: en vez de N tableros que el dueño revisa uno
+# por uno, UN relato de toda la flota — qué necesita atención (rankeado) y qué
+# PODRÍA tener una causa COMÚN. Todo es agregación de lo que las sedes ya reportan
+# (summary/inventario/último latido) + la correlación de amenazas que ya existe.
+# No añade motores ni persiste nada. Las causas comunes son HIPÓTESIS (marcadas
+# como inferidas) — honestidad ante todo, no se afirman certezas.
+FLEET_RECENT_OFFLINE_SECONDS = 1800  # "cayó hace poco" (para el corte regional)
+_FLEET_ATTENTION_RANK = {"critical": 0, "high": 1, "medium": 2}
+
+
+def _site_attention(state: dict) -> tuple[str | None, list[str]]:
+    """(severidad, [motivos]) de una sede para el parte de flota. severidad=None
+    si la sede no necesita nada."""
+    summ = state["summary"]
+    reasons: list[str] = []
+    sev: str | None = None
+    if not state["online"]:
+        reasons.append("sin conexión con la central")
+        sev = "critical"
+    cdown = int(summ.get("criticals_down", 0) or 0)
+    if cdown > 0:
+        reasons.append(f"{cdown} activo(s) crítico(s) caído(s)")
+        sev = "critical"
+    if state["unmanaged"] > 0:
+        reasons.append(f"{state['unmanaged']} equipo(s) sin gestionar")
+        sev = sev or "high"
+    alerts = int(summ.get("alerts", 0) or 0)
+    if alerts > 0:
+        reasons.append(f"{alerts} alerta(s) abierta(s)")
+        sev = sev or "medium"
+    return sev, reasons
+
+
+@app.get("/v1/fleet/brief")
+def fleet_brief(p: Principal = Depends(principal)) -> dict:
+    """**Cerebro de Flota**: un solo relato de toda la flota. Devuelve el titular,
+    estadísticas agregadas, la lista RANKEADA de sedes que necesitan atención y las
+    CORRELACIONES (causa común: posible corte regional, mismo intruso saltando de
+    sede, caída generalizada de críticos). Filtra al ALCANCE de quien llama."""
+    now = _now()
+    scoped = [
+        (site_id, rec) for site_id, rec in store.list_sites(p.org_token)
+        if p.sees_site(site_id)
+    ]
+    states: list[dict] = []
+    for site_id, rec in scoped:
+        so = _site_out(site_id, rec, now)
+        unmanaged = sum(
+            1 for d in (rec.get("devices") or [])
+            if (d.get("trust") or "unknown") == "unknown"
+        )
+        states.append({
+            "site_id": site_id,
+            "site_name": so["site_name"],
+            "online": so["online"],
+            "seconds_since_update": so["seconds_since_update"],
+            "summary": so["summary"],
+            "unmanaged": unmanaged,
+        })
+
+    # ── Correlaciones (causa COMÚN) ──────────────────────────────────────────
+    correlations: list[dict] = []
+    offline = sorted(
+        (s for s in states if not s["online"]),
+        key=lambda s: s["seconds_since_update"],
+    )
+    explained_offline: set[str] = set()
+    if len(offline) >= 2:
+        recent = sum(
+            1 for s in offline
+            if s["seconds_since_update"] <= FLEET_RECENT_OFFLINE_SECONDS
+        )
+        explained_offline = {s["site_id"] for s in offline}
+        correlations.append({
+            "type": "regional_outage",
+            "severity": "critical",
+            "confidence": "inferred",
+            "title": f"Posible corte regional: {len(offline)} sedes sin conexión",
+            "detail": (
+                f"{len(offline)} sedes dejaron de reportar"
+                + (f" ({recent} en la última media hora)" if recent else "")
+                + ". Podría ser tu proveedor de internet o un problema de red "
+                "regional — no cada sede por separado."
+            ),
+            "recommendation": (
+                "Revisa el enlace/proveedor común antes de ir sede por sede."
+            ),
+            "sites": [
+                {"site_id": s["site_id"], "site_name": s["site_name"],
+                 "seconds_since_update": s["seconds_since_update"]}
+                for s in offline
+            ],
+        })
+
+    # Amenazas itinerantes (mismo equipo en varias sedes): correlación CONFIRMADA.
+    threats, _tsum = _compute_fleet_threats(scoped)
+    for t in threats:
+        if t["severity"] in ("critical", "high"):
+            correlations.append({
+                "type": t["type"],
+                "severity": t["severity"],
+                "confidence": "confirmed",
+                "title": t["title"],
+                "detail": t["detail"],
+                "recommendation": t["recommendation"],
+                "sites": [
+                    {"site_id": s["site_id"], "site_name": s["site_name"]}
+                    for s in t["sites"]
+                ],
+            })
+
+    # Caída generalizada de activos críticos en 2+ sedes a la vez.
+    crit_sites = [
+        s for s in states if int(s["summary"].get("criticals_down", 0) or 0) > 0
+    ]
+    if len(crit_sites) >= 2:
+        correlations.append({
+            "type": "widespread_criticals",
+            "severity": "critical",
+            "confidence": "inferred",
+            "title": f"Activos críticos caídos en {len(crit_sites)} sedes",
+            "detail": (
+                "Varias sedes tienen activos críticos sin responder al mismo "
+                "tiempo. Puede indicar una causa común (energía, proveedor, una "
+                "actualización)."
+            ),
+            "recommendation": "Compara qué comparten esas sedes.",
+            "sites": [
+                {"site_id": s["site_id"], "site_name": s["site_name"],
+                 "criticals_down": int(s["summary"].get("criticals_down", 0) or 0)}
+                for s in crit_sites
+            ],
+        })
+    correlations.sort(key=lambda c: _SEV_RANK.get(c["severity"], 9))
+
+    # ── Atención por sede (anti-spam) ────────────────────────────────────────
+    attention: list[dict] = []
+    sites_needing = 0
+    for s in states:
+        sev, reasons = _site_attention(s)
+        if sev is None:
+            continue
+        sites_needing += 1
+        # Anti-spam: si su ÚNICO problema es estar offline y ya hay un corte
+        # regional detectado, no lo repetimos (lo cubre la correlación).
+        if (s["site_id"] in explained_offline
+                and reasons == ["sin conexión con la central"]):
+            continue
+        attention.append({
+            "site_id": s["site_id"], "site_name": s["site_name"],
+            "severity": sev, "reasons": reasons,
+        })
+    attention.sort(key=lambda a: (_FLEET_ATTENTION_RANK.get(a["severity"], 9),
+                                  a["site_name"].lower()))
+
+    stats = {
+        "sites_total": len(states),
+        "sites_online": sum(1 for s in states if s["online"]),
+        "sites_offline": sum(1 for s in states if not s["online"]),
+        "devices_total": sum(int(s["summary"].get("devices_total", 0) or 0) for s in states),
+        "devices_online": sum(int(s["summary"].get("devices_online", 0) or 0) for s in states),
+        "alerts_total": sum(int(s["summary"].get("alerts", 0) or 0) for s in states),
+        "criticals_down_total": sum(int(s["summary"].get("criticals_down", 0) or 0) for s in states),
+        "unmanaged_total": sum(s["unmanaged"] for s in states),
+    }
+
+    if sites_needing == 0 and not correlations:
+        headline = (
+            f"Toda la flota en orden — {stats['sites_total']} sede(s), "
+            f"{stats['sites_online']} en línea."
+        )
+    else:
+        parts = [f"{sites_needing} de {stats['sites_total']} sede(s) necesitan atención"]
+        if any(c["type"] == "regional_outage" for c in correlations):
+            parts.append("posible corte regional")
+        headline = " · ".join(parts) + "."
+
+    return {
+        "headline": headline,
+        "stats": stats,
+        "attention": attention,
+        "correlations": correlations,
+        "generated_at": now.isoformat(),
+        "role": p.role,
+    }
 
 
 _GRADE_BANDS = [(90, "A"), (75, "B"), (60, "C"), (40, "D"), (0, "F")]
