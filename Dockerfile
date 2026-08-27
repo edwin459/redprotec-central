@@ -9,6 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # que un módulo nuevo se quede fuera del contenedor (pasó con auth.py).
 COPY *.py ./
 
+# Panel WEB (build de Flutter Web servido en /panel, mismo origen que la API).
+COPY panel_web ./panel_web
+
 # Fly.io / hosts inyectan PORT; por defecto 8080.
 ENV PORT=8080
 EXPOSE 8080

@@ -39,6 +39,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from auth import supabase_auth_configured, verify_supabase_jwt
@@ -108,6 +109,15 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="RedProtec Central Relay", version="0.9.28", lifespan=lifespan)
+
+# ── Panel WEB (consola en el navegador) ──────────────────────────────────────
+# Sirve el build de Flutter Web (la MISMA app) en /panel, en el MISMO origen que
+# la API → sin líos de CORS. El build se compila con `--base-href /panel/` y se
+# copia a `central/panel_web/` (el Dockerfile lo incluye). Si la carpeta no está
+# (deploy sin panel), simplemente no se monta y el relay sigue igual.
+_PANEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_web")
+if os.path.isdir(_PANEL_DIR):
+    app.mount("/panel", StaticFiles(directory=_PANEL_DIR, html=True), name="panel")
 
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
