@@ -13,7 +13,7 @@
     --shadow:0 10px 30px rgba(0,0,0,.35);
   }
   *{box-sizing:border-box}
-  html,body{margin:0;height:100%}
+  html,body{margin:0;height:100%;max-width:100%;overflow-x:hidden}
   body{
     background:
       radial-gradient(900px 500px at 15% -5%, rgba(34,211,238,.10), transparent 60%),
@@ -94,8 +94,8 @@
   .copilot .ct .tag{font-size:10px;font-weight:900;letter-spacing:.12em;color:var(--green);
     border:1px solid var(--green);border-radius:6px;padding:2px 7px;margin-left:2px}
   .copilot .lead{color:var(--muted);font-size:12.5px;margin:0 0 14px;line-height:1.45}
-  .cbar{display:flex;gap:10px}
-  .cbar input{flex:1;background:var(--bg);border:1px solid var(--line2);border-radius:12px;
+  .cbar{display:flex;gap:10px;flex-wrap:wrap}
+  .cbar input{flex:1 1 180px;min-width:0;background:var(--bg);border:1px solid var(--line2);border-radius:12px;
     padding:14px 16px;font-size:15px}
   .cbar input:focus{border-color:var(--cyan)}
   .cbar .go{background:linear-gradient(120deg,var(--cyan),var(--green));color:#04141a;border:none;
@@ -230,6 +230,8 @@
   .num{font-variant-numeric:tabular-nums}
   .barwrap{height:7px;background:var(--bg2);border-radius:4px;overflow:hidden;min-width:90px}
   .barfill{height:100%;background:var(--cyan)}
+  .tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+  .tscroll table{min-width:520px}
   .loading,.empty{color:var(--muted);padding:30px;text-align:center}
   .priceRow{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
   .priceRow input{width:170px}
@@ -238,7 +240,32 @@
 
   /* políticas */
   .polwrap{display:grid;grid-template-columns:320px 1fr;gap:22px;align-items:start}
-  @media(max-width:820px){.polwrap{grid-template-columns:1fr}#app{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap}}
+  @media(max-width:820px){
+    .polwrap{grid-template-columns:1fr}
+    /* barra lateral → cabecera superior con nav horizontal desplazable */
+    #app{grid-template-columns:1fr}
+    .side{position:sticky;top:0;height:auto;flex-direction:column;z-index:30;
+      border-right:none;border-bottom:1px solid var(--line);
+      background:rgba(11,17,27,.96);backdrop-filter:blur(8px)}
+    .side .top{padding:12px 16px}
+    nav{flex-direction:row;overflow-x:auto;-webkit-overflow-scrolling:touch;
+      padding:0 10px 10px;gap:6px;flex:0 0 auto;scrollbar-width:none}
+    nav::-webkit-scrollbar{display:none}
+    .navi{flex:0 0 auto;padding:8px 13px;white-space:nowrap}
+    .side .foot{display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid var(--line)}
+    .side .foot .acct{margin-bottom:0;flex:1;font-size:11px}
+    .logout{width:auto;padding:7px 13px;flex:0 0 auto}
+    main{padding:18px 15px 70px;max-width:100%}
+    .topbar{margin-bottom:16px}
+    .topbar h2{font-size:19px}
+    .warhero{grid-template-columns:1fr;text-align:center;justify-items:center;gap:16px;padding:20px 16px}
+    .warhead .mini{justify-content:center;gap:18px}
+    .fsbtn{display:none}
+    .hero{flex-direction:column;text-align:center;align-items:center}
+    .stats{gap:11px}
+    .stat .v{font-size:23px}
+  }
+  @media(max-width:400px){.stats{grid-template-columns:1fr 1fr}}
   .polcard{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 20px}
   .polcard h4{margin:0 0 4px;font-size:15px}
   .polrow{display:flex;align-items:center;gap:12px;padding:14px 0;border-top:1px solid var(--line)}
@@ -581,7 +608,7 @@ async function renderSites(c){
       <td class="num" style="color:${su.criticals_down?'var(--red)':'var(--muted)'}">${su.criticals_down||0}</td>
       <td class="muted">${s.remote_admin?'Sí':'No'}</td></tr>`;
   }).join('');
-  c.innerHTML=`<table><thead><tr><th>Sede</th><th>Estado</th><th>Equipos</th><th>Alertas</th><th>Críticos caídos</th><th>Admin remota</th></tr></thead><tbody>${rows}</tbody></table>`;
+  c.innerHTML=`<div class="tscroll"><table><thead><tr><th>Sede</th><th>Estado</th><th>Equipos</th><th>Alertas</th><th>Críticos caídos</th><th>Admin remota</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 /* ============ AMENAZAS ============ */
@@ -686,7 +713,7 @@ async function renderWarRoom(c){
         <td class="num muted">${s.mttr_seconds?fmtDur(s.mttr_seconds):'—'}</td>
         <td class="num muted">${s.downtime_seconds?fmtDur(s.downtime_seconds):'0s'}</td></tr>`;
     }).join('');
-    h+=`<table><thead><tr><th>Sede</th><th>Uptime</th><th>Incidentes</th><th>MTTR</th><th>Caída total</th></tr></thead><tbody>${rows}</tbody></table>
+    h+=`<div class="tscroll"><table><thead><tr><th>Sede</th><th>Uptime</th><th>Incidentes</th><th>MTTR</th><th>Caída total</th></tr></thead><tbody>${rows}</tbody></table></div>
       <p class="muted" style="font-size:11.5px;margin-top:10px">Prueba auditable de disponibilidad de los últimos 30 días — Fing no da esto. MTTR = tiempo medio de recuperación.</p>`;
   }
 
@@ -809,7 +836,7 @@ async function renderConsumption(c){
       <td class="num muted">~${s.monthly_gb_est||0} GB</td>
       ${_price!=null?`<td class="num" style="color:var(--green)">~$${(s.monthly_cost_est||0).toFixed(2)}</td>`:''}
       <td class="muted">${esc(s.top?s.top.name:'—')}</td></tr>`).join('');
-  h+=`<table><thead><tr><th>#</th><th>Sede</th><th>Consumo</th><th>Participación</th><th>Est. mensual</th>${_price!=null?'<th>Costo est.</th>':''}<th>Mayor consumidor</th></tr></thead><tbody>${rows}</tbody></table>
+  h+=`<div class="tscroll"><table><thead><tr><th>#</th><th>Sede</th><th>Consumo</th><th>Participación</th><th>Est. mensual</th>${_price!=null?'<th>Costo est.</th>':''}<th>Mayor consumidor</th></tr></thead><tbody>${rows}</tbody></table></div>
     <p class="muted" style="font-size:11.5px;margin-top:12px">Consumo EN VIVO (algunos valores son estimados por categoría, con ~). La estimación mensual asume el ritmo actual.</p>`;
   c.innerHTML=h; bindPrice();
 }
