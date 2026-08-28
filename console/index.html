@@ -175,6 +175,48 @@
   .ftile .fm .m .n{font-size:19px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1}
   .ftile .fm .m .t{font-size:10.5px;color:var(--muted);margin-top:3px}
 
+  /* ---------- EQUIPOS ---------- */
+  .dvtabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  .dvtab{background:var(--panel);border:1px solid var(--line2);color:var(--muted);border-radius:20px;
+    padding:8px 14px;font-weight:600;display:flex;gap:8px;align-items:center}
+  .dvtab.active{border-color:var(--cyan);color:var(--cyan);background:rgba(34,211,238,.10)}
+  .dvtab .d{width:7px;height:7px;border-radius:50%}
+  .dvtools{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .dvsearch{flex:1 1 220px;min-width:0;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;
+    padding:11px 14px;color:var(--ink);font:inherit}
+  .dvsearch:focus{border-color:var(--cyan)}
+  .dvchips{display:flex;gap:7px;flex-wrap:wrap}
+  .dvchip{background:var(--bg2);border:1px solid var(--line2);color:var(--muted);border-radius:20px;
+    padding:7px 12px;font-size:12.5px;font-weight:600}
+  .dvchip.active{border-color:var(--cyan);color:var(--ink);background:rgba(34,211,238,.10)}
+  .expbtn{background:var(--panel);border:1px solid var(--line2);color:var(--ink);border-radius:10px;
+    padding:10px 14px;font-weight:600;display:flex;gap:8px;align-items:center}
+  .expbtn:hover{border-color:var(--green)}
+  .dev{display:flex;align-items:center;gap:13px;background:var(--panel);border:1px solid var(--line);
+    border-radius:13px;padding:13px 15px;margin-bottom:9px;flex-wrap:wrap}
+  .dev .ava{width:40px;height:40px;border-radius:11px;flex:0 0 auto;display:grid;place-items:center;
+    background:var(--bg2);font-size:18px;position:relative}
+  .dev .ava .ol{position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border-radius:50%;
+    border:2px solid var(--panel)}
+  .dev .meta{flex:1 1 200px;min-width:0}
+  .dev .meta .nm{font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .dev .meta .sub{color:var(--muted);font-size:12px;margin-top:2px;overflow:hidden;text-overflow:ellipsis}
+  .crit{font-size:9.5px;font-weight:900;letter-spacing:.04em;padding:2px 7px;border-radius:6px;
+    border:1px solid var(--amber);color:var(--amber);background:#f5b64222}
+  .tpill{font-size:11px;font-weight:800;padding:3px 10px;border-radius:20px;white-space:nowrap}
+  .tpill.trusted{color:var(--green);background:#34d39922}
+  .tpill.blocked{color:var(--red);background:#f2555a22}
+  .tpill.unknown{color:var(--muted);background:var(--bg2);border:1px solid var(--line2)}
+  .dev .acts{display:flex;gap:7px;flex-wrap:wrap}
+  .dvbtn{border:1px solid var(--line2);background:var(--bg2);color:var(--ink);border-radius:9px;
+    padding:8px 12px;font-weight:700;font-size:12.5px}
+  .dvbtn:hover{border-color:var(--cyan)}
+  .dvbtn.block:hover{border-color:var(--red);color:var(--red)}
+  .dvbtn.trust:hover{border-color:var(--green);color:var(--green)}
+  .dvbtn:disabled{opacity:.4;cursor:default}
+  .dvnote{background:rgba(245,182,66,.08);border:1px solid var(--amber);border-radius:11px;
+    padding:12px 15px;margin-bottom:14px;font-size:12.5px;display:flex;gap:9px;align-items:flex-start}
+
   /* ---------- SALA DE GUERRA (NOC) ---------- */
   .warhero{display:grid;grid-template-columns:auto 1fr auto;gap:26px;align-items:center;
     background:linear-gradient(135deg,var(--panel2),var(--panel));border:1px solid var(--line2);
@@ -425,6 +467,7 @@ const VIEWS = [
   {id:'brief', title:'Centro', sub:'Copiloto que actúa + parte de tu flota', icon:'<path d="M12 3a5 5 0 0 0-5 5c0 2 1 3 1 5h8c0-2 1-3 1-5a5 5 0 0 0-5-5zM9 20h6M10 22h4"/>', render:renderBrief},
   {id:'war', title:'Sala de Guerra', sub:'Centro de operaciones en vivo · disponibilidad, incidentes on-call y SLA', icon:'<path d="M12 2v4M12 18v4M2 12h4M18 12h4M12 12l6-3M5 19l7-7"/><circle cx="12" cy="12" r="3"/>', render:renderWarRoom},
   {id:'sites', title:'Sedes', sub:'Todas tus redes/sedes en vivo', icon:'<path d="M4 21V8l8-5 8 5v13M9 21v-6h6v6"/>', render:renderSites},
+  {id:'devices', title:'Equipos', sub:'Todos los dispositivos de tus redes — verlos y controlarlos', icon:'<path d="M4 5h16v10H4zM2 19h20M9 9h6"/>', render:renderDevices},
   {id:'threats', title:'Amenazas', sub:'Correlacionadas entre sedes', icon:'<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/>', render:renderThreats},
   {id:'policy', title:'Políticas', sub:'El estándar de tu organización y su cumplimiento', icon:'<path d="M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>', render:renderPolicy},
   {id:'consumption', title:'Consumo', sub:'Quién consume más en tu flota', icon:'<path d="M3 3v18h18M8 15l3-4 3 3 4-6"/>', render:renderConsumption},
@@ -537,7 +580,7 @@ function copilotHTML(){
       <span class="ai"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#04141a" stroke-width="2.2"><path d="M12 3a5 5 0 0 0-5 5c0 2 1 3 1 5h8c0-2 1-3 1-5a5 5 0 0 0-5-5zM9 20h6M10 22h4"/></svg></span>
       <h3>Copiloto de Flota</h3><span class="tag">IA · ACTÚA</span>
     </div>
-    <p class="lead">Da una orden en lenguaje natural y actúo en <b>todas tus sedes a la vez</b>. Te muestro la propuesta antes de ejecutar — nada se hace sin tu confirmación. Esto Fing no lo tiene.</p>
+    <p class="lead">Da una orden en lenguaje natural y actúo en <b>todas tus sedes a la vez</b>. Te muestro la propuesta antes de ejecutar — nada se hace sin tu confirmación.</p>
     <div class="cbar">
       <input id="cpIn" type="text" placeholder="Ej.: bloquea la Samsung en todas las sedes" autocomplete="off">
       <button class="go" id="cpGo"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg> Analizar</button>
@@ -627,6 +670,114 @@ async function renderSites(c){
       <td class="muted">${s.remote_admin?'Sí':'No'}</td></tr>`;
   }).join('');
   c.innerHTML=`<div class="tscroll"><table><thead><tr><th>Sede</th><th>Estado</th><th>Equipos</th><th>Alertas</th><th>Críticos caídos</th><th>Admin remota</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+/* ============ EQUIPOS (ver + controlar dispositivos de tus redes) ============ */
+let _devSite=null, _devQuery='', _devFilter='all';
+function deviceEmoji(d){ const s=((d.name||'')+' '+(d.vendor||'')+' '+(d.device_type||'')).toLowerCase();
+  if(/iphone|samsung|galaxy|phone|android|xiaomi|redmi|movil|m[oó]vil|celular/.test(s))return'📱';
+  if(/\btv\b|roku|chromecast|firestick|smart|televi/.test(s))return'📺';
+  if(/cam|c[aá]mara|hikvision|dahua|nvr/.test(s))return'📷';
+  if(/router|gateway|modem|m[oó]dem|tp-?link|mikrotik|ubiquiti|arris|access point/.test(s))return'📶';
+  if(/printer|impres|epson|canon|brother/.test(s))return'🖨️';
+  if(/playstation|xbox|nintendo|console|consola/.test(s))return'🎮';
+  if(/mac|imac|laptop|port[aá]til|pc|desktop|windows|dell|lenovo|asus|acer|hp\b/.test(s))return'💻';
+  if(/echo|alexa|google home|nest|speaker|bocina/.test(s))return'🔊';
+  return'🔌'; }
+const _TRUST_LABEL={trusted:'Confiable',blocked:'Bloqueado',unknown:'Sin clasificar'};
+function _actMsg(a){ return {block:'Equipo bloqueado',unblock:'Equipo desbloqueado',trust:'Equipo marcado de confianza',rename:'Equipo renombrado'}[a]||'Orden enviada'; }
+function devActions(d){ const blocked=d.trust==='blocked'; let a='';
+  a+= blocked ? `<button class="dvbtn trust" data-act="unblock">Desbloquear</button>`
+             : `<button class="dvbtn block" data-act="block">Bloquear</button>`;
+  if(d.trust!=='trusted') a+=`<button class="dvbtn trust" data-act="trust">Confiar</button>`;
+  a+=`<button class="dvbtn" data-act="rename">Renombrar</button>`; return a; }
+function devRow(d, canAct){ const trust=d.trust||'unknown';
+  return `<div class="dev" data-mac="${esc(d.mac||'')}">
+    <div class="ava">${deviceEmoji(d)}<span class="ol" style="background:${d.online?'var(--green)':'var(--muted2)'}"></span></div>
+    <div class="meta"><div class="nm">${esc(d.name||d.mac||'Equipo')}${d.is_critical?' <span class="crit">CRÍTICO</span>':''}</div>
+      <div class="sub">${esc(d.vendor||'—')} · ${esc(d.ip||'—')} · ${esc((d.mac||'—').toUpperCase())}</div></div>
+    <span class="tpill ${trust}">${_TRUST_LABEL[trust]}</span>
+    <div class="acts">${canAct?devActions(d):'<span class="muted" style="font-size:12px">solo lectura</span>'}</div></div>`; }
+function exportDevicesCsv(list, siteName){
+  const H=['Nombre','IP','MAC','Fabricante','Estado','Clasificación','Crítico'];
+  const rows=[H].concat(list.map(d=>[d.name||'',d.ip||'',(d.mac||'').toUpperCase(),d.vendor||'',
+    d.online?'En línea':'Desconectado',_TRUST_LABEL[d.trust||'unknown']||'',d.is_critical?'Sí':'No']));
+  const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob=new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob), a=document.createElement('a');
+  a.href=url; a.download=`equipos_${String(siteName||'red').replace(/[^\w]+/g,'_')}.csv`;
+  document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},600);
+  toast('CSV exportado');
+}
+async function renderDevices(c){
+  const sd = await api('/v1/sites'); const sites=sd.sites||[];
+  if(!sites.length){ c.innerHTML='<div class="empty">Aún no tienes redes vinculadas. Vincula una desde la app RedProtec y aquí verás todos sus equipos.</div>'; return; }
+  if(!_devSite || !sites.find(s=>s.site_id===_devSite)) _devSite=sites[0].site_id;
+  const detail = await api('/v1/sites/'+encodeURIComponent(_devSite));
+  const devices = detail.devices||[];
+  const site = sites.find(s=>s.site_id===_devSite)||{};
+  const canAct = !!detail.can_command && !!detail.remote_admin;
+
+  let h='';
+  if(sites.length>1){
+    h+='<div class="dvtabs">'+sites.map(s=>`<button class="dvtab ${s.site_id===_devSite?'active':''}" data-site="${esc(s.site_id)}"><span class="d" style="background:${s.online?'var(--green)':'var(--muted2)'}"></span>${esc(s.site_name)}</button>`).join('')+'</div>';
+  }
+  if(!detail.remote_admin) h+='<div class="dvnote">⚠️ <div>Esta red no tiene <b>administración remota</b> activada: puedes ver los equipos pero no controlarlos desde aquí. Actívala en el agente de esa red.</div></div>';
+  else if(!detail.can_command) h+='<div class="dvnote">🔒 <div>Tu plan/rol permite ver los equipos pero no controlarlos a distancia. Para bloquear o confiar necesitas plan Pro.</div></div>';
+  h+=`<div class="dvtools">
+      <input class="dvsearch" id="devSearch" placeholder="Buscar por nombre, IP, MAC o fabricante…" value="${esc(_devQuery)}">
+      <button class="expbtn" id="devExport"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg> Exportar CSV</button>
+    </div>
+    <div class="dvchips" id="devChips"></div>
+    <div id="devSummary" style="margin:14px 0"></div>
+    <div id="devList"></div>`;
+  c.innerHTML=h;
+
+  c.querySelectorAll('.dvtab').forEach(b=>b.onclick=()=>{ _devSite=b.dataset.site; _devQuery=''; _devFilter='all'; load(); });
+
+  const FILTERS=[['all','Todos'],['online','En línea'],['blocked','Bloqueados'],['trusted','Confiables'],['unknown','Sin clasificar'],['critical','Críticos']];
+  const counts=()=>({ all:devices.length, online:devices.filter(d=>d.online).length,
+    blocked:devices.filter(d=>d.trust==='blocked').length, trusted:devices.filter(d=>d.trust==='trusted').length,
+    unknown:devices.filter(d=>(d.trust||'unknown')==='unknown').length, critical:devices.filter(d=>d.is_critical).length });
+  function match(d){
+    if(_devFilter==='online'&&!d.online)return false;
+    if(_devFilter==='blocked'&&d.trust!=='blocked')return false;
+    if(_devFilter==='trusted'&&d.trust!=='trusted')return false;
+    if(_devFilter==='unknown'&&(d.trust||'unknown')!=='unknown')return false;
+    if(_devFilter==='critical'&&!d.is_critical)return false;
+    const q=_devQuery.trim().toLowerCase(); if(!q)return true;
+    return [d.name,d.ip,d.mac,d.vendor,d.hostname].some(x=>String(x||'').toLowerCase().includes(q));
+  }
+  function paintSummary(){ const ct=counts();
+    document.getElementById('devSummary').innerHTML=`<div class="stats">
+      ${stat(ct.all,'Equipos','var(--cyan)')}${stat(ct.online,'En línea','var(--green)')}
+      ${stat(ct.blocked,'Bloqueados',ct.blocked?'var(--red)':'var(--muted)')}
+      ${stat(ct.unknown,'Sin clasificar',ct.unknown?'#ff9f45':'var(--muted)')}
+      ${stat(ct.critical,'Críticos',ct.critical?'var(--amber)':'var(--muted)')}</div>`; }
+  function paintChips(){ const ct=counts();
+    document.getElementById('devChips').innerHTML=FILTERS.map(([k,l])=>`<button class="dvchip ${_devFilter===k?'active':''}" data-f="${k}">${l} <span class="muted">${ct[k]}</span></button>`).join('');
+    document.querySelectorAll('#devChips .dvchip').forEach(b=>b.onclick=()=>{ _devFilter=b.dataset.f; paintChips(); paintList(); }); }
+  function bindRows(cont){ cont.querySelectorAll('.dev .dvbtn').forEach(b=>b.onclick=async()=>{
+      const row=b.closest('.dev'), mac=row.dataset.mac, act=b.dataset.act;
+      const dev=devices.find(x=>(x.mac||'')===mac)||{}; let value=null;
+      if(act==='rename'){ value=prompt('Nuevo nombre para este equipo:', dev.name||''); if(value===null) return; value=value.trim(); if(!value) return; }
+      b.disabled=true; const old=b.textContent; b.textContent='…';
+      try{
+        await apiPost('/v1/sites/'+encodeURIComponent(_devSite)+'/commands', {action:act, mac, value});
+        toast(_actMsg(act)+' — se aplica cuando el agente sincronice');
+        if(act==='block')dev.trust='blocked'; else if(act==='unblock')dev.trust='unknown';
+        else if(act==='trust')dev.trust='trusted'; else if(act==='rename')dev.name=value;
+        paintSummary(); paintChips(); paintList();
+      }catch(e){ const m=e.status===402?'Requiere plan Pro para controlar equipos.':e.status===403?'Tu rol no permite esta acción.':(e.message||'No se pudo');
+        toast(m,true); b.disabled=false; b.textContent=old; }
+    }); }
+  function paintList(){ const list=devices.filter(match); const cont=document.getElementById('devList');
+    if(!list.length){ cont.innerHTML='<div class="empty">Sin equipos que coincidan con el filtro/búsqueda.</div>'; return; }
+    cont.innerHTML=list.map(d=>devRow(d,canAct)).join(''); bindRows(cont); }
+
+  paintSummary(); paintChips(); paintList();
+  document.getElementById('devSearch').oninput=(e)=>{ _devQuery=e.target.value; paintList(); };
+  document.getElementById('devExport').onclick=()=>exportDevicesCsv(devices.filter(match), site.site_name);
 }
 
 /* ============ AMENAZAS ============ */
@@ -751,7 +902,7 @@ async function renderWarRoom(c){
         <td class="num muted">${s.downtime_seconds?fmtDur(s.downtime_seconds):'0s'}</td></tr>`;
     }).join('');
     h+=`<div class="tscroll"><table><thead><tr><th>Sede</th><th>Uptime</th><th>Incidentes</th><th>MTTR</th><th>Caída total</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <p class="muted" style="font-size:11.5px;margin-top:10px">Prueba auditable de disponibilidad de los últimos 30 días — Fing no da esto. MTTR = tiempo medio de recuperación.</p>`;
+      <p class="muted" style="font-size:11.5px;margin-top:10px">Prueba auditable de disponibilidad de los últimos 30 días. MTTR = tiempo medio de recuperación.</p>`;
   }
 
   // ── intruso itinerante (multi-sede) ──
