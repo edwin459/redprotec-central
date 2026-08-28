@@ -126,6 +126,14 @@ _CONSOLE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "console
 if os.path.isdir(_CONSOLE_DIR):
     app.mount("/console", StaticFiles(directory=_CONSOLE_DIR, html=True), name="console")
 
+# PÁGINA PÚBLICA DE DESCARGAS (sin login): cualquier persona baja la app (APK) y el
+# agente (Windows) para probar el proyecto completo. Los binarios NO viven aquí (el
+# APK pesa >100 MB, tope de GitHub); se sirven desde GitHub Releases (repo público)
+# y esta página solo enlaza a ellos. En /descargar.
+_DL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "descargas")
+if os.path.isdir(_DL_DIR):
+    app.mount("/descargar", StaticFiles(directory=_DL_DIR, html=True), name="descargar")
+
 # ── P0.3: Rate limiting + bloqueo por fuerza bruta (en memoria, por IP) ──────
 # Límite GLOBAL generoso (solo frena inundaciones) y BLOQUEO estricto por fallos
 # de auth (401/403) para frenar fuerza bruta del ADMIN_TOKEN o de tokens.

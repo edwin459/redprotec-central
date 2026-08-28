@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RedProtec · Descargas</title>
+<meta name="description" content="Prueba RedProtec completo: descarga la app de Android y el agente para Windows.">
+<style>
+  :root{
+    --bg:#070b12; --bg2:#0b111b; --panel:#0e1520; --panel2:#111a27;
+    --line:#1b2636; --line2:#243347;
+    --ink:#eaf6ff; --muted:#8ea6bf; --muted2:#5f7a94;
+    --cyan:#22d3ee; --green:#34d399; --amber:#f5b642; --violet:#8ab4ff;
+    --shadow:0 18px 50px rgba(0,0,0,.45);
+    --grad:linear-gradient(120deg,var(--cyan),var(--green));
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%;max-width:100%;overflow-x:hidden}
+  body{
+    background:
+      radial-gradient(1100px 620px at 12% -8%, rgba(34,211,238,.13), transparent 60%),
+      radial-gradient(1000px 560px at 98% 2%, rgba(52,211,153,.10), transparent 55%),
+      radial-gradient(800px 700px at 50% 120%, rgba(138,180,255,.07), transparent 60%),
+      var(--bg);
+    color:var(--ink);
+    font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased; font-size:15px; line-height:1.5;
+  }
+  a{color:var(--cyan);text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+
+  /* ---------- NAV ---------- */
+  header.nav{position:sticky;top:0;z-index:20;backdrop-filter:blur(12px);
+    background:rgba(7,11,18,.72);border-bottom:1px solid var(--line)}
+  .nav .wrap{display:flex;align-items:center;justify-content:space-between;height:64px;gap:14px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand .mark{width:34px;height:34px;flex:0 0 auto}
+  .brand .wm{font-weight:800;letter-spacing:.14em;font-size:18px}
+  .brand .wm .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .nav .links{display:flex;gap:8px}
+  .nav .links a{color:var(--muted);font-weight:600;font-size:13.5px;padding:9px 14px;border-radius:10px;
+    border:1px solid transparent;transition:.15s}
+  .nav .links a:hover{color:var(--ink);border-color:var(--line2);background:var(--panel)}
+
+  /* ---------- HERO ---------- */
+  .hero{text-align:center;padding:64px 0 30px}
+  .hero .bigmark{width:104px;height:104px;margin:0 auto 22px;filter:drop-shadow(0 8px 26px rgba(34,211,238,.35))}
+  .badge{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;letter-spacing:.03em;
+    color:var(--green);background:rgba(52,211,153,.10);border:1px solid rgba(52,211,153,.30);
+    border-radius:999px;padding:6px 14px;margin-bottom:20px}
+  .badge .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green);
+    animation:pulse 1.8s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .hero h1{font-size:clamp(30px,5.4vw,46px);font-weight:850;letter-spacing:-.02em;margin:0 0 14px;
+    line-height:1.08;text-wrap:balance}
+  .hero h1 .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p{color:var(--muted);font-size:clamp(15px,2.4vw,18px);max-width:640px;margin:0 auto;text-wrap:balance}
+
+  /* ---------- DOWNLOAD CARDS ---------- */
+  .downloads{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin:44px 0 12px}
+  .dl{background:linear-gradient(150deg,rgba(255,255,255,.028),transparent 60%),var(--panel);
+    border:1px solid var(--line2);border-radius:22px;padding:28px 26px;box-shadow:var(--shadow);
+    display:flex;flex-direction:column;position:relative;overflow:hidden;transition:.2s}
+  .dl::before{content:"";position:absolute;inset:0;border-radius:22px;padding:1px;
+    background:linear-gradient(140deg,rgba(34,211,238,.5),transparent 45%);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;opacity:0;transition:.2s;pointer-events:none}
+  .dl:hover{transform:translateY(-4px);border-color:var(--line2)}
+  .dl:hover::before{opacity:1}
+  .dl.win::before{background:linear-gradient(140deg,rgba(52,211,153,.5),transparent 45%)}
+  .dl .ico{width:58px;height:58px;border-radius:16px;display:grid;place-items:center;margin-bottom:18px;
+    background:rgba(34,211,238,.10);border:1px solid rgba(34,211,238,.26)}
+  .dl.win .ico{background:rgba(52,211,153,.10);border-color:rgba(52,211,153,.26)}
+  .dl .ico svg{width:30px;height:30px}
+  .dl .plat{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted2)}
+  .dl h2{font-size:22px;font-weight:800;margin:3px 0 8px;letter-spacing:-.01em}
+  .dl .desc{color:var(--muted);font-size:14px;margin:0 0 16px;flex:0 0 auto}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}
+  .chip{font-size:12px;font-weight:600;color:var(--muted);background:var(--bg2);border:1px solid var(--line);
+    border-radius:999px;padding:5px 11px}
+  .cta{display:flex;align-items:center;justify-content:center;gap:10px;background:var(--grad);color:#04141a;
+    font-weight:800;letter-spacing:.01em;border:none;border-radius:13px;padding:15px;font-size:15.5px;
+    box-shadow:0 10px 24px rgba(34,211,238,.22);transition:.18s;text-align:center}
+  .dl.win .cta{box-shadow:0 10px 24px rgba(52,211,153,.22)}
+  .cta:hover{filter:brightness(1.07);transform:translateY(-1px)}
+  .cta svg{width:19px;height:19px}
+  .subnote{color:var(--muted2);font-size:12.5px;margin-top:14px;line-height:1.55}
+  .subnote b{color:var(--muted)}
+
+  /* QR (solo Android) */
+  .qrrow{display:flex;align-items:center;gap:16px;margin-top:20px;padding-top:20px;border-top:1px dashed var(--line2)}
+  .qrbox{width:96px;height:96px;flex:0 0 auto;background:#fff;border-radius:12px;padding:7px;
+    box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  .qrbox img{width:100%;height:100%;display:block;image-rendering:pixelated}
+  .qrtxt{font-size:13px;color:var(--muted)}
+  .qrtxt b{color:var(--ink);display:block;margin-bottom:3px;font-size:13.5px}
+
+  /* ---------- STEPS ---------- */
+  .section{margin:56px 0 10px}
+  .section .eyebrow{text-align:center;font-size:12.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--cyan);margin-bottom:8px}
+  .section h3{text-align:center;font-size:clamp(22px,3.4vw,28px);font-weight:800;margin:0 0 34px;letter-spacing:-.01em}
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  .step{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:24px 22px;position:relative}
+  .step .n{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;font-weight:900;font-size:15px;
+    color:#04141a;background:var(--grad);margin-bottom:15px}
+  .step h4{font-size:16.5px;font-weight:750;margin:0 0 7px}
+  .step p{color:var(--muted);font-size:13.5px;margin:0}
+  .step .line{position:absolute;top:41px;right:-9px;width:18px;height:2px;background:var(--line2)}
+  .steps .step:last-child .line{display:none}
+
+  /* ---------- TRUST ---------- */
+  .trust{display:flex;flex-wrap:wrap;gap:14px;justify-content:center;margin:44px 0 10px}
+  .tcard{display:flex;align-items:center;gap:11px;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:14px 18px;font-size:13.5px;color:var(--muted);max-width:340px}
+  .tcard svg{width:22px;height:22px;flex:0 0 auto;stroke:var(--green);fill:none;stroke-width:1.9}
+  .tcard b{color:var(--ink)}
+
+  /* ---------- FOOTER ---------- */
+  footer{border-top:1px solid var(--line);margin-top:60px;padding:30px 0 46px;text-align:center;
+    color:var(--muted2);font-size:12.5px}
+  footer .wm{font-weight:800;letter-spacing:.12em;color:var(--muted)}
+  footer .wm .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+
+  @media(max-width:760px){
+    .downloads{grid-template-columns:1fr}
+    .steps{grid-template-columns:1fr}
+    .step .line{display:none}
+    .hero{padding:44px 0 20px}
+    .nav .links a:first-child{display:none}
+  }
+</style>
+</head>
+<body>
+
+<!-- Logo reutilizable como <symbol>: escudo + ondas WiFi + nodos de red -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="rpg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+    <symbol id="rpmark" viewBox="0 0 64 64">
+      <path d="M32 4 L56 13 V32 C56 47 45 56 32 60 C19 56 8 47 8 32 V13 Z"
+            fill="none" stroke="url(#rpg)" stroke-width="3" stroke-linejoin="round"/>
+      <path d="M20 30 a17 17 0 0 1 24 0" fill="none" stroke="url(#rpg)" stroke-width="2.6" stroke-linecap="round"/>
+      <path d="M25 36 a10 10 0 0 1 14 0" fill="none" stroke="url(#rpg)" stroke-width="2.6" stroke-linecap="round"/>
+      <circle cx="32" cy="43" r="3.2" fill="url(#rpg)"/>
+      <circle cx="20" cy="30" r="2.1" fill="#34d399"/>
+      <circle cx="44" cy="30" r="2.1" fill="#22d3ee"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="nav">
+  <div class="wrap">
+    <div class="brand">
+      <svg class="mark"><use href="#rpmark"/></svg>
+      <span class="wm">RED<span class="g">PROTEC</span></span>
+    </div>
+    <nav class="links">
+      <a href="/panel/">Abrir la app web</a>
+      <a href="/console/">Consola</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <svg class="bigmark"><use href="#rpmark"/></svg>
+    <div class="badge"><span class="dot"></span>Beta · Prueba gratis</div>
+    <h1>Prueba <span class="g">RedProtec</span> completo</h1>
+    <p>Descarga la app para tu teléfono y el agente para un PC de tu red.
+       En minutos ves todos tus equipos, quién se conecta y proteges tu red.</p>
+  </section>
+
+  <section class="downloads">
+
+    <!-- ANDROID -->
+    <article class="dl and">
+      <div class="ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="url(#rpg)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="6" y="2.5" width="12" height="19" rx="2.5"/><line x1="10" y1="18.5" x2="14" y2="18.5"/>
+        </svg>
+      </div>
+      <div class="plat">Android</div>
+      <h2>App RedProtec</h2>
+      <p class="desc">Tu red en el bolsillo: equipos, alertas, control y seguridad desde el teléfono.</p>
+      <div class="meta">
+        <span class="chip">APK · 127 MB</span>
+        <span class="chip">Android 6.0+</span>
+        <span class="chip">Instalación directa</span>
+      </div>
+      <a class="cta" id="dlApk" href="#" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 19h16"/></svg>
+        Descargar APK
+      </a>
+      <div class="qrrow">
+        <div class="qrbox"><img id="qrimg" alt="Código QR para descargar el APK"></div>
+        <div class="qrtxt"><b>¿Estás en el computador?</b>Escanea este QR con la cámara de tu teléfono para descargarlo ahí mismo.</div>
+      </div>
+      <div class="subnote">Al instalar, Android pedirá permitir <b>“instalar apps de esta fuente”</b>: acéptalo. Es normal para apps fuera de la tienda.</div>
+    </article>
+
+    <!-- WINDOWS -->
+    <article class="dl win">
+      <div class="ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="url(#rpg)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="4" width="19" height="13" rx="1.6"/><line x1="8" y1="20.5" x2="16" y2="20.5"/><line x1="12" y1="17" x2="12" y2="20.5"/>
+        </svg>
+      </div>
+      <div class="plat">Windows 10 / 11</div>
+      <h2>Agente RedProtec</h2>
+      <p class="desc">Se instala en un PC de tu red y es el “motor”: escanea, mide y protege todos los equipos.</p>
+      <div class="meta">
+        <span class="chip">Instalador · 46 MB</span>
+        <span class="chip">Windows 10/11</span>
+        <span class="chip">Requiere admin</span>
+      </div>
+      <a class="cta" id="dlExe" href="#" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4.5-4.5M12 15l4.5-4.5"/><path d="M4 19h16"/></svg>
+        Descargar agente
+      </a>
+      <div class="subnote" style="margin-top:auto;padding-top:20px">Windows puede mostrar un aviso de “editor desconocido”: pulsa <b>Más información → Ejecutar de todas formas</b>. El agente pide permiso de administrador para poder proteger la red.</div>
+    </article>
+
+  </section>
+
+  <section class="section">
+    <div class="eyebrow">Empieza en minutos</div>
+    <h3>Cómo probarlo en 3 pasos</h3>
+    <div class="steps">
+      <div class="step">
+        <div class="n">1</div><div class="line"></div>
+        <h4>Instala el agente</h4>
+        <p>En un PC que esté siempre encendido en tu red (o el tuyo). Es quien vigila la red.</p>
+      </div>
+      <div class="step">
+        <div class="n">2</div><div class="line"></div>
+        <h4>Instala la app</h4>
+        <p>En tu teléfono Android. Desde ahí ves y controlas todo, dentro y fuera de casa.</p>
+      </div>
+      <div class="step">
+        <div class="n">3</div>
+        <h4>Crea tu cuenta y vincula</h4>
+        <p>Regístrate en la app y vincula tu PC. Cada usuario ve solo lo suyo, aunque compartan red.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="trust">
+    <div class="tcard">
+      <svg viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>
+      <div><b>Tú mandas.</b> Nada sale de tu red sin tu permiso; los datos son tuyos.</div>
+    </div>
+    <div class="tcard">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></svg>
+      <div><b>Prueba sin compromiso.</b> Instálalo, míralo funcionar y decide con calma.</div>
+    </div>
+    <div class="tcard">
+      <svg viewBox="0 0 24 24"><path d="M4 12h16M4 12l4-4M4 12l4 4"/><path d="M20 6v12"/></svg>
+      <div><b>Se desinstala fácil.</b> Un clic para quitar el agente cuando quieras.</div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wm">RED<span class="g">PROTEC</span></div>
+  <div style="margin-top:8px">Seguridad y control para tu red · Versión de prueba (Beta)</div>
+</footer>
+
+<script>
+  // URLs de descarga (GitHub Releases — repo público, sin login, hasta 2 GB por archivo).
+  var APK = "https://github.com/edwin459/redprotec-central/releases/download/beta/RedProtec.apk";
+  var EXE = "https://github.com/edwin459/redprotec-central/releases/download/beta/RedProtecAgent-Setup.exe";
+  document.getElementById("dlApk").href = APK;
+  document.getElementById("dlExe").href = EXE;
+  // QR del APK (generado offline, embebido). Escanear → descarga en el teléfono.
+  document.getElementById("qrimg").src = "data:image/png;base64,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";
+</script>
+
+</body>
+</html>

@@ -15,6 +15,9 @@ COPY panel_web ./panel_web
 # Consola WEB dedicada (dashboard de escritorio servido en /console).
 COPY console ./console
 
+# Página pública de descargas (APK + agente) servida en /descargar.
+COPY descargas ./descargas
+
 # Fly.io / hosts inyectan PORT; por defecto 8080.
 ENV PORT=8080
 EXPOSE 8080
