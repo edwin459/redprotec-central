@@ -216,6 +216,35 @@
   .dvbtn:disabled{opacity:.4;cursor:default}
   .dvnote{background:rgba(245,182,66,.08);border:1px solid var(--amber);border-radius:11px;
     padding:12px 15px;margin-bottom:14px;font-size:12.5px;display:flex;gap:9px;align-items:flex-start}
+  .dvsel{width:18px;height:18px;flex:0 0 auto;accent-color:#22d3ee;cursor:pointer;margin:0}
+  .dvopen{cursor:pointer}
+  .dvbulk{position:sticky;top:8px;z-index:6;display:flex;gap:9px;align-items:center;flex-wrap:wrap;
+    background:var(--panel2);border:1px solid var(--cyan);border-radius:12px;padding:11px 14px;margin-bottom:12px;
+    box-shadow:var(--shadow)}
+  .dvbulk b{color:var(--cyan)} .dvbulk .sp{flex:1}
+  .dvbulk .bk{background:var(--red);color:#fff;border:none;border-radius:9px;padding:8px 13px;font-weight:800;font-size:12.5px}
+  .dvbulk .tr{background:var(--green);color:#04141a;border:none;border-radius:9px;padding:8px 13px;font-weight:800;font-size:12.5px}
+  .dvbulk .ub{background:var(--cyan);color:#04141a;border:none;border-radius:9px;padding:8px 13px;font-weight:800;font-size:12.5px}
+  .dvbulk .cl{background:none;border:1px solid var(--line2);color:var(--muted);border-radius:9px;padding:8px 12px;font-weight:700;font-size:12.5px}
+  /* modal ficha de equipo */
+  .modal{position:fixed;inset:0;background:rgba(3,6,11,.74);backdrop-filter:blur(4px);
+    display:grid;place-items:center;padding:18px;z-index:100}
+  .modalcard{background:var(--panel);border:1px solid var(--line2);border-radius:18px;
+    width:min(96vw,460px);max-height:88vh;overflow:auto;box-shadow:var(--shadow)}
+  .mch{display:flex;align-items:center;gap:13px;padding:20px 22px;border-bottom:1px solid var(--line)}
+  .mch .ava{width:52px;height:52px;border-radius:13px;display:grid;place-items:center;background:var(--bg2);font-size:24px;position:relative;flex:0 0 auto}
+  .mch .ava .ol{position:absolute;right:-2px;bottom:-2px;width:14px;height:14px;border-radius:50%;border:2px solid var(--panel)}
+  .mch .nm{font-size:18px;font-weight:800;line-height:1.2}
+  .mch .close{margin-left:auto;background:none;border:1px solid var(--line2);color:var(--muted);
+    border-radius:9px;width:34px;height:34px;font-size:18px;flex:0 0 auto}
+  .mch .close:hover{border-color:var(--red);color:var(--red)}
+  .mbody{padding:6px 22px 8px}
+  .mrow{display:flex;justify-content:space-between;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}
+  .mrow:last-child{border-bottom:none}
+  .mrow .k{color:var(--muted);font-size:12.5px}
+  .mrow .v{font-weight:600;font-size:13.5px;text-align:right;word-break:break-word}
+  .macts{display:flex;gap:9px;flex-wrap:wrap;padding:14px 22px 22px}
+  .macts .dvbtn{flex:1 1 auto;text-align:center;padding:11px}
 
   /* ---------- SALA DE GUERRA (NOC) ---------- */
   .warhero{display:grid;grid-template-columns:auto 1fr auto;gap:26px;align-items:center;
@@ -673,16 +702,17 @@ async function renderSites(c){
 }
 
 /* ============ EQUIPOS (ver + controlar dispositivos de tus redes) ============ */
-let _devSite=null, _devQuery='', _devFilter='all';
+let _devSite=null, _devQuery='', _devFilter='all', _devSel=new Set();
+function fmtBpsShort(b){ if(b==null) return null; return fmtBps(b); }
 function deviceEmoji(d){ const s=((d.name||'')+' '+(d.vendor||'')+' '+(d.device_type||'')).toLowerCase();
-  if(/iphone|samsung|galaxy|phone|android|xiaomi|redmi|movil|m[oó]vil|celular/.test(s))return'📱';
-  if(/\btv\b|roku|chromecast|firestick|smart|televi/.test(s))return'📺';
-  if(/cam|c[aá]mara|hikvision|dahua|nvr/.test(s))return'📷';
+  if(/\btv\b|roku|chromecast|firestick|smart\s?tv|televi/.test(s))return'📺';
+  if(/cam|c[aá]mara|hikvision|dahua|\bnvr\b/.test(s))return'📷';
   if(/router|gateway|modem|m[oó]dem|tp-?link|mikrotik|ubiquiti|arris|access point/.test(s))return'📶';
   if(/printer|impres|epson|canon|brother/.test(s))return'🖨️';
   if(/playstation|xbox|nintendo|console|consola/.test(s))return'🎮';
-  if(/mac|imac|laptop|port[aá]til|pc|desktop|windows|dell|lenovo|asus|acer|hp\b/.test(s))return'💻';
-  if(/echo|alexa|google home|nest|speaker|bocina/.test(s))return'🔊';
+  if(/echo|alexa|google home|\bnest\b|speaker|bocina/.test(s))return'🔊';
+  if(/iphone|galaxy|\bphone\b|android|xiaomi|redmi|m[oó]vil|celular/.test(s))return'📱';
+  if(/mac|imac|laptop|port[aá]til|\bpc\b|desktop|windows|dell|lenovo|asus|acer/.test(s))return'💻';
   return'🔌'; }
 const _TRUST_LABEL={trusted:'Confiable',blocked:'Bloqueado',unknown:'Sin clasificar'};
 function _actMsg(a){ return {block:'Equipo bloqueado',unblock:'Equipo desbloqueado',trust:'Equipo marcado de confianza',rename:'Equipo renombrado'}[a]||'Orden enviada'; }
@@ -691,11 +721,13 @@ function devActions(d){ const blocked=d.trust==='blocked'; let a='';
              : `<button class="dvbtn block" data-act="block">Bloquear</button>`;
   if(d.trust!=='trusted') a+=`<button class="dvbtn trust" data-act="trust">Confiar</button>`;
   a+=`<button class="dvbtn" data-act="rename">Renombrar</button>`; return a; }
-function devRow(d, canAct){ const trust=d.trust||'unknown';
-  return `<div class="dev" data-mac="${esc(d.mac||'')}">
-    <div class="ava">${deviceEmoji(d)}<span class="ol" style="background:${d.online?'var(--green)':'var(--muted2)'}"></span></div>
-    <div class="meta"><div class="nm">${esc(d.name||d.mac||'Equipo')}${d.is_critical?' <span class="crit">CRÍTICO</span>':''}</div>
-      <div class="sub">${esc(d.vendor||'—')} · ${esc(d.ip||'—')} · ${esc((d.mac||'—').toUpperCase())}</div></div>
+function devRow(d, canAct){ const trust=d.trust||'unknown'; const mac=d.mac||'';
+  const sel=_devSel.has(mac);
+  return `<div class="dev" data-mac="${esc(mac)}">
+    ${canAct?`<input type="checkbox" class="dvsel" data-mac="${esc(mac)}" ${sel?'checked':''} title="Seleccionar">`:''}
+    <div class="ava dvopen" data-mac="${esc(mac)}">${deviceEmoji(d)}<span class="ol" style="background:${d.online?'var(--green)':'var(--muted2)'}"></span></div>
+    <div class="meta dvopen" data-mac="${esc(mac)}"><div class="nm">${esc(d.name||mac||'Equipo')}${d.is_critical?' <span class="crit">CRÍTICO</span>':''}</div>
+      <div class="sub">${esc(d.vendor||'—')} · ${esc(d.ip||'—')} · ${esc((mac||'—').toUpperCase())}</div></div>
     <span class="tpill ${trust}">${_TRUST_LABEL[trust]}</span>
     <div class="acts">${canAct?devActions(d):'<span class="muted" style="font-size:12px">solo lectura</span>'}</div></div>`; }
 function exportDevicesCsv(list, siteName){
@@ -717,6 +749,8 @@ async function renderDevices(c){
   const devices = detail.devices||[];
   const site = sites.find(s=>s.site_id===_devSite)||{};
   const canAct = !!detail.can_command && !!detail.remote_admin;
+  // podar selección: solo equipos que siguen presentes
+  const _macset=new Set(devices.map(d=>d.mac||'')); [..._devSel].forEach(m=>{ if(!_macset.has(m)) _devSel.delete(m); });
 
   let h='';
   if(sites.length>1){
@@ -730,10 +764,11 @@ async function renderDevices(c){
     </div>
     <div class="dvchips" id="devChips"></div>
     <div id="devSummary" style="margin:14px 0"></div>
+    <div id="devBulk"></div>
     <div id="devList"></div>`;
   c.innerHTML=h;
 
-  c.querySelectorAll('.dvtab').forEach(b=>b.onclick=()=>{ _devSite=b.dataset.site; _devQuery=''; _devFilter='all'; load(); });
+  c.querySelectorAll('.dvtab').forEach(b=>b.onclick=()=>{ _devSite=b.dataset.site; _devQuery=''; _devFilter='all'; _devSel.clear(); load(); });
 
   const FILTERS=[['all','Todos'],['online','En línea'],['blocked','Bloqueados'],['trusted','Confiables'],['unknown','Sin clasificar'],['critical','Críticos']];
   const counts=()=>({ all:devices.length, online:devices.filter(d=>d.online).length,
@@ -757,25 +792,88 @@ async function renderDevices(c){
   function paintChips(){ const ct=counts();
     document.getElementById('devChips').innerHTML=FILTERS.map(([k,l])=>`<button class="dvchip ${_devFilter===k?'active':''}" data-f="${k}">${l} <span class="muted">${ct[k]}</span></button>`).join('');
     document.querySelectorAll('#devChips .dvchip').forEach(b=>b.onclick=()=>{ _devFilter=b.dataset.f; paintChips(); paintList(); }); }
-  function bindRows(cont){ cont.querySelectorAll('.dev .dvbtn').forEach(b=>b.onclick=async()=>{
-      const row=b.closest('.dev'), mac=row.dataset.mac, act=b.dataset.act;
-      const dev=devices.find(x=>(x.mac||'')===mac)||{}; let value=null;
-      if(act==='rename'){ value=prompt('Nuevo nombre para este equipo:', dev.name||''); if(value===null) return; value=value.trim(); if(!value) return; }
+  function applyLocal(dev,act,value){ if(act==='block')dev.trust='blocked'; else if(act==='unblock')dev.trust='unknown';
+    else if(act==='trust')dev.trust='trusted'; else if(act==='rename')dev.name=value; else if(act==='set_owner')dev.owner=value; }
+  function errMsg(e){ return e.status===402?'Requiere plan Pro para controlar equipos.':e.status===403?'Tu rol no permite esta acción.':(e.message||'No se pudo'); }
+  async function sendCmd(mac,act,value){
+    await apiPost('/v1/sites/'+encodeURIComponent(_devSite)+'/commands',{action:act,mac,value});
+    const dev=devices.find(x=>(x.mac||'')===mac); if(dev) applyLocal(dev,act,value); return true; }
+  function repaint(){ paintSummary(); paintChips(); paintBulk(); paintList(); }
+
+  function paintBulk(){ const el=document.getElementById('devBulk'); if(!el) return;
+    const n=_devSel.size; if(!n){ el.innerHTML=''; return; }
+    el.innerHTML=`<div class="dvbulk"><b>${n}</b> seleccionado(s) <span class="sp"></span>
+      <button class="bk" data-b="block">Bloquear</button>
+      <button class="tr" data-b="trust">Confiar</button>
+      <button class="ub" data-b="unblock">Desbloquear</button>
+      <button class="cl" data-b="clear">Limpiar</button></div>`;
+    el.querySelectorAll('.dvbulk button').forEach(b=>b.onclick=()=>bulkAct(b.dataset.b)); }
+  async function bulkAct(act){
+    if(act==='clear'){ _devSel.clear(); repaint(); return; }
+    const macs=[..._devSel]; let ok=0,fail=0;
+    for(const mac of macs){ try{ await sendCmd(mac,act,null); ok++; }catch(e){ fail++; if(e.status===402||e.status===403){ toast(errMsg(e),true); break; } } }
+    _devSel.clear();
+    toast(`${_actMsg(act)}: ${ok} equipo(s)`+(fail?` · ${fail} fallaron`:'')+' — se aplica al sincronizar', fail>0);
+    repaint(); }
+
+  function openModal(mac){ const d=devices.find(x=>(x.mac||'')===mac); if(!d) return;
+    const trust=d.trust||'unknown'; const cons=d.bytes_per_sec!=null?((d.consumption_estimated?'~':'')+fmtBps(d.bytes_per_sec)):null;
+    const row=(k,v)=>v?`<div class="mrow"><span class="k">${k}</span><span class="v">${v}</span></div>`:'';
+    const ov=document.createElement('div'); ov.className='modal';
+    ov.innerHTML=`<div class="modalcard">
+      <div class="mch"><div class="ava">${deviceEmoji(d)}<span class="ol" style="background:${d.online?'var(--green)':'var(--muted2)'}"></span></div>
+        <div><div class="nm">${esc(d.name||mac||'Equipo')}</div><div class="muted" style="font-size:12px">${esc(d.vendor||'Fabricante desconocido')}</div></div>
+        <button class="close" aria-label="Cerrar">×</button></div>
+      <div class="mbody">
+        ${row('Estado', d.online?'<span style="color:var(--green)">● En línea</span>':'<span class="muted">○ Desconectado</span>')}
+        ${row('Clasificación', `<span class="tpill ${trust}">${_TRUST_LABEL[trust]}</span>`)}
+        ${row('Crítico', d.is_critical?'<span class="crit">SÍ</span>':'No')}
+        ${row('Dirección IP', esc(d.ip||'—'))}
+        ${row('MAC', esc((mac||'—').toUpperCase()))}
+        ${row('Fabricante', esc(d.vendor||'—'))}
+        ${row('Responsable', esc(d.owner||'— (sin asignar)'))}
+        ${row('Área / Zona', esc(d.area||'—'))}
+        ${row('Consumo ahora', cons?esc(cons):'—')}
+      </div>
+      ${canAct?`<div class="macts">
+        ${trust==='blocked'?'<button class="dvbtn trust" data-m="unblock">Desbloquear</button>':'<button class="dvbtn block" data-m="block">Bloquear</button>'}
+        ${trust!=='trusted'?'<button class="dvbtn trust" data-m="trust">Confiar</button>':''}
+        <button class="dvbtn" data-m="rename">Renombrar</button>
+        <button class="dvbtn" data-m="set_owner">Responsable</button>
+      </div>`:'<div class="macts"><span class="muted" style="font-size:12.5px">Solo lectura (sin admin remota o sin plan Pro).</span></div>'}
+    </div>`;
+    const close=()=>ov.remove();
+    ov.addEventListener('click',e=>{ if(e.target===ov) close(); });
+    ov.querySelector('.close').onclick=close;
+    ov.querySelectorAll('.macts .dvbtn').forEach(b=>b.onclick=async()=>{
+      const act=b.dataset.m; let value=null;
+      if(act==='rename'){ value=prompt('Nuevo nombre para este equipo:', d.name||''); if(value===null)return; value=value.trim(); if(!value)return; }
+      if(act==='set_owner'){ value=prompt('¿Quién es el responsable de este equipo?', d.owner||''); if(value===null)return; value=value.trim(); }
       b.disabled=true; const old=b.textContent; b.textContent='…';
-      try{
-        await apiPost('/v1/sites/'+encodeURIComponent(_devSite)+'/commands', {action:act, mac, value});
-        toast(_actMsg(act)+' — se aplica cuando el agente sincronice');
-        if(act==='block')dev.trust='blocked'; else if(act==='unblock')dev.trust='unknown';
-        else if(act==='trust')dev.trust='trusted'; else if(act==='rename')dev.name=value;
-        paintSummary(); paintChips(); paintList();
-      }catch(e){ const m=e.status===402?'Requiere plan Pro para controlar equipos.':e.status===403?'Tu rol no permite esta acción.':(e.message||'No se pudo');
-        toast(m,true); b.disabled=false; b.textContent=old; }
-    }); }
+      try{ await sendCmd(mac,act,value); toast(_actMsg(act)+' — se aplica al sincronizar'); close(); repaint(); }
+      catch(e){ toast(errMsg(e),true); b.disabled=false; b.textContent=old; }
+    });
+    document.body.appendChild(ov);
+  }
+
+  function bindRows(cont){
+    cont.querySelectorAll('.dev .dvbtn').forEach(b=>b.onclick=async()=>{
+      const mac=b.closest('.dev').dataset.mac, act=b.dataset.act;
+      const dev=devices.find(x=>(x.mac||'')===mac)||{}; let value=null;
+      if(act==='rename'){ value=prompt('Nuevo nombre para este equipo:', dev.name||''); if(value===null)return; value=value.trim(); if(!value)return; }
+      b.disabled=true; const old=b.textContent; b.textContent='…';
+      try{ await sendCmd(mac,act,value); toast(_actMsg(act)+' — se aplica cuando el agente sincronice'); repaint(); }
+      catch(e){ toast(errMsg(e),true); b.disabled=false; b.textContent=old; }
+    });
+    cont.querySelectorAll('.dvsel').forEach(ch=>ch.onchange=()=>{ const m=ch.dataset.mac;
+      if(ch.checked)_devSel.add(m); else _devSel.delete(m); paintBulk(); });
+    cont.querySelectorAll('.dvopen').forEach(el=>el.onclick=()=>openModal(el.dataset.mac));
+  }
   function paintList(){ const list=devices.filter(match); const cont=document.getElementById('devList');
     if(!list.length){ cont.innerHTML='<div class="empty">Sin equipos que coincidan con el filtro/búsqueda.</div>'; return; }
     cont.innerHTML=list.map(d=>devRow(d,canAct)).join(''); bindRows(cont); }
 
-  paintSummary(); paintChips(); paintList();
+  paintSummary(); paintChips(); paintBulk(); paintList();
   document.getElementById('devSearch').oninput=(e)=>{ _devQuery=e.target.value; paintList(); };
   document.getElementById('devExport').onclick=()=>exportDevicesCsv(devices.filter(match), site.site_name);
 }
