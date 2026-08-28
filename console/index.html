@@ -246,6 +246,32 @@
   .macts{display:flex;gap:9px;flex-wrap:wrap;padding:14px 22px 22px}
   .macts .dvbtn{flex:1 1 auto;text-align:center;padding:11px}
 
+  /* ---------- REPORTE ---------- */
+  .reportbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+  .reportbar button{background:var(--panel);border:1px solid var(--line2);color:var(--ink);border-radius:10px;
+    padding:11px 16px;font-weight:700;display:flex;gap:8px;align-items:center}
+  .reportbar .pdf{background:linear-gradient(120deg,var(--cyan),var(--green));color:#04141a;border:none}
+  .reportbar button:hover{border-color:var(--cyan)}
+  .reportbar svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2}
+  .rhead{display:flex;align-items:center;gap:14px;border-bottom:2px solid var(--line2);padding-bottom:16px;margin-bottom:6px}
+  .rhead .t{font-size:20px;font-weight:800}
+  .rhead .m{color:var(--muted);font-size:12.5px;margin-top:3px;line-height:1.5}
+  .rsec{font-size:12.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:800;margin:24px 0 12px}
+  @media print{
+    @page{margin:14mm}
+    html,body{background:#fff !important}
+    body{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .side,.topbar,.reportbar,.menutoggle{display:none !important}
+    #app{display:block !important} main{padding:0 !important;max-width:100% !important}
+    .report{color:#111}
+    .rhead .t,.rhead .m .em{color:#111 !important}
+    .stat,table{background:#fff !important;border:1px solid #cbd5e1 !important;box-shadow:none !important}
+    .stat .l,.muted,.rsec,thead th{color:#555 !important}
+    tbody td{color:#111 !important;border-color:#e2e8f0 !important}
+    thead th{border-color:#cbd5e1 !important}
+    .tpill,.pill,.crit,.badge{border:1px solid #cbd5e1 !important}
+  }
+
   /* ---------- MAPA DE RED ---------- */
   .mapwrap{background:radial-gradient(circle at 50% 45%,rgba(34,211,238,.06),transparent 60%),var(--panel);
     border:1px solid var(--line);border-radius:16px;padding:8px;overflow:hidden}
@@ -511,6 +537,7 @@ const VIEWS = [
   {id:'threats', title:'Amenazas', sub:'Correlacionadas entre sedes', icon:'<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/>', render:renderThreats},
   {id:'policy', title:'Políticas', sub:'El estándar de tu organización y su cumplimiento', icon:'<path d="M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>', render:renderPolicy},
   {id:'consumption', title:'Consumo', sub:'Quién consume más en tu flota', icon:'<path d="M3 3v18h18M8 15l3-4 3 3 4-6"/>', render:renderConsumption},
+  {id:'report', title:'Reporte', sub:'Informe descargable de tu red — PDF o Excel', icon:'<path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8l-5-5H8zM14 3v5h5M8 13h8M8 17h5"/>', render:renderReport},
 ];
 let current = 'brief';
 let _nav = {};          // badges por vista
@@ -1216,6 +1243,61 @@ async function renderConsumption(c){
 function bindPrice(){
   const b=document.getElementById('calc'); if(!b) return;
   b.onclick=()=>{ const v=parseFloat(document.getElementById('price').value); _price=(!isNaN(v)&&v>=0)?v:null; load(); };
+}
+
+/* ============ REPORTE (PDF vía impresión + Excel/CSV) ============ */
+async function renderReport(c){
+  const R=await Promise.allSettled([api('/v1/sites'),api('/v1/availability'),api('/v1/sla?days=30'),api('/v1/incidents')]);
+  const sites=((R[0].status==='fulfilled'?R[0].value:{})||{}).sites||[];
+  const av=((R[1].status==='fulfilled'?R[1].value:{})||{}).summary||{};
+  const sla=(R[2].status==='fulfilled'?R[2].value:{})||{};
+  const inc=((R[3].status==='fulfilled'?R[3].value:{})||{}).incidents||[];
+  const slaByName={}; (sla.sites||[]).forEach(s=>slaByName[s.site_name]=s);
+  const now=new Date();
+  let fdate; try{ fdate=now.toLocaleDateString('es',{year:'numeric',month:'long',day:'numeric'})+' · '+now.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'}); }catch(e){ fdate=now.toISOString(); }
+  const totDev=sites.reduce((a,s)=>a+((s.summary||{}).devices_total||0),0);
+  const onDev=sites.reduce((a,s)=>a+((s.summary||{}).devices_online||0),0);
+  const alerts=sites.reduce((a,s)=>a+((s.summary||{}).alerts||0),0);
+  const crit=sites.reduce((a,s)=>a+((s.summary||{}).criticals_down||0),0);
+  const upG=(sla.overall&&sla.overall.uptime_pct!=null)?sla.overall.uptime_pct+'%':'—';
+
+  let h=`<div class="reportbar">
+    <button class="pdf" id="rPrint"><svg viewBox="0 0 24 24"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></svg> Imprimir / Guardar PDF</button>
+    <button id="rCsv"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg> Descargar Excel (CSV)</button>
+  </div>
+  <div class="report">
+    <div class="rhead"><span>${LOGO_SVG}</span>
+      <div><div class="t"><span style="color:var(--cyan)">Red</span>Protec — Reporte de red</div>
+      <div class="m">Cuenta: <span class="em">${esc(store.email||'—')}</span> · Generado: ${esc(fdate)} · ${sites.length} sede(s)</div></div></div>
+    <div class="rsec">Resumen general</div>
+    <div class="stats">
+      ${stat((av.sites_online!=null?av.sites_online:sites.filter(s=>s.online).length)+'/'+(av.sites||sites.length),'Sedes en línea','var(--green)')}
+      ${stat(onDev+'/'+totDev,'Equipos en línea','var(--cyan)')}
+      ${stat(alerts,'Alertas',alerts?'var(--amber)':'var(--muted)')}
+      ${stat(crit,'Críticos caídos',crit?'var(--red)':'var(--muted)')}
+      ${stat(upG,'Uptime 30 días','var(--cyan)')}
+    </div>
+    <div class="rsec">Sedes</div>
+    <div class="tscroll"><table><thead><tr><th>Sede</th><th>Estado</th><th>Equipos</th><th>Alertas</th><th>Críticos</th><th>Uptime 30d</th></tr></thead><tbody>
+      ${sites.map(s=>{const su=s.summary||{},sl=slaByName[s.site_name]; return `<tr>
+        <td><b>${esc(s.site_name)}</b></td><td>${s.online?'En línea':'Sin conexión'}</td>
+        <td class="num">${su.devices_online||0}/${su.devices_total||0}</td><td class="num">${su.alerts||0}</td>
+        <td class="num">${su.criticals_down||0}</td><td class="num">${sl?sl.uptime_pct+'%':'—'}</td></tr>`;}).join('')||'<tr><td colspan="6" class="muted">Sin sedes.</td></tr>'}
+    </tbody></table></div>
+    ${inc.length?'<div class="rsec">Incidentes abiertos</div>'+inc.map(x=>`<div class="atn"><div class="bar" style="background:var(--red)"></div><div><b>${esc(x.site_name)}</b><p>Caída hace ${fmtDur(x.down_seconds)}${x.acked?' · confirmado':''}</p></div></div>`).join(''):''}
+    <p class="muted" style="font-size:11px;margin-top:22px">Informe generado por RedProtec desde la consola de operaciones. Datos en vivo al momento de la generación. Solo incluye las redes de tu cuenta.</p>
+  </div>`;
+  c.innerHTML=h;
+  document.getElementById('rPrint').onclick=()=>{ try{ window.print(); }catch(e){ toast('Tu navegador no permitió imprimir aquí',true); } };
+  document.getElementById('rCsv').onclick=()=>{
+    const rows=[['Sede','Estado','Equipos en línea','Equipos total','Alertas','Críticos caídos','Admin remota','Uptime 30d %']];
+    sites.forEach(s=>{const su=s.summary||{},sl=slaByName[s.site_name];
+      rows.push([s.site_name,s.online?'En línea':'Sin conexión',su.devices_online||0,su.devices_total||0,su.alerts||0,su.criticals_down||0,s.remote_admin?'Sí':'No',sl?sl.uptime_pct:'']);});
+    const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    const blob=new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'}); const url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url; a.download='reporte_red_'+now.toISOString().slice(0,10)+'.csv'; document.body.appendChild(a); a.click();
+    setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},600); toast('CSV exportado');
+  };
 }
 
 // ---------- auto-refresh ----------
