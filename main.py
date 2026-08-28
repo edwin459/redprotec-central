@@ -356,7 +356,7 @@ _ROLE_CAPS: dict[str, set[str]] = {
 }
 # Qué capacidad exige cada comando remoto.
 _CMD_CAP: dict[str, str] = {
-    "block": "block", "unblock": "block",
+    "block": "block", "unblock": "block", "freeze": "block",
     "trust": "trust", "rename": "rename", "set_owner": "rename",
 }
 _VALID_ROLES = set(_ROLE_CAPS)
@@ -1004,6 +1004,15 @@ class DeviceEntry(BaseModel):
     # app lo etiqueta con «~». Sin este campo, model_dump() lo descartaría.
     consumption_estimated: bool = False
     area: str | None = None
+    # ── Radiografía / ADN del equipo (multisede): ficha forense remota.
+    # Determinista (puertos+modelo+riesgo+antigüedad), sin captura de DNS.
+    open_ports: list[int] = Field(default_factory=list)
+    device_type: str | None = None
+    mac_is_random: bool = False
+    ai_model: str | None = None
+    ai_model_confidence: int | None = None
+    risk_level: str | None = None
+    first_seen: str | None = None
 
 
 class Heartbeat(BaseModel):
@@ -1016,9 +1025,13 @@ class Heartbeat(BaseModel):
 
 
 class CommandIn(BaseModel):
-    action: str = Field(pattern="^(block|trust|unblock|rename|set_owner)$")
+    # 'freeze' = Congelar temporizado: bloquea AHORA y el relay agenda el
+    # desbloqueo automático a los `minutes` (se descongela solo aunque cierres la
+    # app). Se traduce a un 'block' para el agente + un temporizador en el relay.
+    action: str = Field(pattern="^(block|trust|unblock|rename|set_owner|freeze)$")
     mac: str = Field(min_length=1, max_length=64)
     value: str | None = Field(default=None, max_length=120)  # nombre/responsable
+    minutes: int | None = Field(default=None, ge=1, le=1440)  # solo para 'freeze'
 
 
 class SiteOut(BaseModel):
@@ -1692,6 +1705,9 @@ def heartbeat(hb: Heartbeat, p: Principal = Depends(require_master)) -> dict:
 
     pending: list[dict] = []
     if hb.remote_admin:
+        # Congelar temporizado: encola el 'unblock' de los equipos cuyo timer venció
+        # ANTES de leer los pendientes, para que se descongelen en ESTE mismo latido.
+        _expire_freezes(org_token, hb.site_id, now)
         pending = store.pending_commands(
             org_token, hb.site_id, COMMAND_TTL_SECONDS, now)
 
@@ -1803,6 +1819,52 @@ def delete_site(site_id: str, p: Principal = Depends(require_master)) -> dict:
     return {"ok": True}
 
 
+# ── Congelar temporizado (freeze) ────────────────────────────────────────────
+# Bloquea un equipo AHORA y el relay agenda su desbloqueo automático a los N min,
+# así se descongela solo aunque la app se cierre. Se guarda el temporizador en el
+# KV por sede; el heartbeat (`_expire_freezes`) encola el 'unblock' al vencer.
+def _freeze_key(org: str, site: str) -> str:
+    return f"freezes::{org}::{site}"
+
+
+def _get_freezes(org: str, site: str) -> list[dict]:
+    raw = store.kv_get(_freeze_key(org, site))
+    try:
+        data = json.loads(raw) if raw else []
+        return data if isinstance(data, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _add_freeze(org: str, site: str, mac: str, until_iso: str) -> None:
+    items = [f for f in _get_freezes(org, site) if f.get("mac") != mac]
+    items.append({"mac": mac, "until": until_iso})
+    store.kv_set(_freeze_key(org, site), json.dumps(items))
+
+
+def _expire_freezes(org: str, site: str, now: datetime) -> None:
+    """Descongela los equipos cuyo temporizador ya venció: encola 'unblock' y los
+    quita del registro. Idempotente; se llama en cada heartbeat de la sede."""
+    items = _get_freezes(org, site)
+    if not items:
+        return
+    keep: list[dict] = []
+    for f in items:
+        try:
+            until = datetime.fromisoformat(str(f.get("until")))
+        except (ValueError, TypeError):
+            continue  # entrada corrupta → se descarta (no se re-agenda)
+        if until <= now:
+            store.enqueue_command(org, site, {
+                "id": uuid.uuid4().hex[:12], "action": "unblock",
+                "mac": f.get("mac"), "value": None, "created_at": now,
+            })
+        else:
+            keep.append(f)
+    if len(keep) != len(items):
+        store.kv_set(_freeze_key(org, site), json.dumps(keep))
+
+
 @app.post("/v1/sites/{site_id}/commands")
 def enqueue_command(
     site_id: str, cmd: CommandIn, p: Principal = Depends(principal)
@@ -1830,18 +1892,27 @@ def enqueue_command(
             status_code=403,
             detail="Esta sede no permite administración remota",
         )
+    # Congelar temporizado: al AGENTE le llega un 'block' normal (no conoce
+    # 'freeze'); el relay agenda el 'unblock' automático a los `minutes`.
+    freeze_minutes = cmd.minutes if cmd.action == "freeze" else None
+    wire_action = "block" if cmd.action == "freeze" else cmd.action
     command = {
         "id": uuid.uuid4().hex[:12],
-        "action": cmd.action,
+        "action": wire_action,
         "mac": cmd.mac,
         "value": cmd.value,
         "created_at": now,
     }
     store.enqueue_command(p.org_token, site_id, command)
-    _audit(p, f"command:{cmd.action}", f"{site_id}/{cmd.mac}",
-           f"Comando remoto «{cmd.action}»"
-           + (f" = {cmd.value}" if cmd.value else ""))
-    return {"ok": True, "command_id": command["id"]}
+    if freeze_minutes:
+        until = now + timedelta(minutes=freeze_minutes)
+        _add_freeze(p.org_token, site_id, cmd.mac, until.isoformat())
+    detail = (f"Comando remoto «{cmd.action}»"
+              + (f" ({freeze_minutes} min)" if freeze_minutes else "")
+              + (f" = {cmd.value}" if cmd.value else ""))
+    _audit(p, f"command:{cmd.action}", f"{site_id}/{cmd.mac}", detail)
+    return {"ok": True, "command_id": command["id"],
+            "freeze_minutes": freeze_minutes}
 
 
 @app.post("/v1/commands/{command_id}/ack")
