@@ -56,6 +56,18 @@
   .hero h1 .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
   .hero p{color:var(--muted);font-size:clamp(15px,2.4vw,18px);max-width:640px;margin:0 auto;text-wrap:balance}
 
+  /* ---------- NOVEDADES ---------- */
+  .whatsnew{margin:8px auto 0;max-width:760px;background:linear-gradient(150deg,rgba(52,211,153,.08),transparent 70%),var(--panel);
+    border:1px solid var(--line2);border-radius:16px;padding:16px 20px}
+  .wn-head{display:flex;align-items:center;gap:9px;font-weight:800;font-size:13px;color:var(--green);
+    letter-spacing:.02em;margin-bottom:10px}
+  .wn-head .wn-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green)}
+  .wn-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+  .wn-list li{position:relative;padding-left:20px;color:var(--muted);font-size:13px;line-height:1.45}
+  .wn-list li::before{content:"";position:absolute;left:4px;top:8px;width:6px;height:6px;border-radius:50%;
+    background:var(--cyan)}
+  .wn-list li b{color:var(--ink);font-weight:700}
+
   /* ---------- DOWNLOAD CARDS ---------- */
   .downloads{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin:44px 0 12px}
   .dl{background:linear-gradient(150deg,rgba(255,255,255,.028),transparent 60%),var(--panel);
@@ -172,6 +184,16 @@
     <h1>Prueba <span class="g">RedProtec</span> completo</h1>
     <p>Descarga la app para tu teléfono y el agente para un PC de tu red.
        En minutos ves todos tus equipos, quién se conecta y proteges tu red.</p>
+  </section>
+
+  <section class="whatsnew">
+    <div class="wn-head"><span class="wn-dot"></span>Novedades · actualizado 28 ago 2026</div>
+    <ul class="wn-list">
+      <li><b>Actividad en vivo:</b> al tocar un equipo, «¿Dónde pasa el tiempo?» muestra en tiempo real cuánto mueve cada dispositivo en línea.</li>
+      <li><b>Estado más claro:</b> cuando el agente no está en línea se ve en verde («Sin conexión con el agente»), sin alarmas rojas.</li>
+      <li><b>Red más estable:</b> el router real siempre aparece con su nombre y el bloqueo nunca afecta al router — sin cortes de internet.</li>
+      <li><b>Identificación mejorada:</b> nombres de dispositivos más reales y planes coherentes entre la app y el agente.</li>
+    </ul>
   </section>
 
   <section class="downloads">
