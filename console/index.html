@@ -207,6 +207,8 @@
   .tpill.trusted{color:var(--green);background:#34d39922}
   .tpill.blocked{color:var(--red);background:#f2555a22}
   .tpill.unknown{color:var(--muted);background:var(--bg2);border:1px solid var(--line2)}
+  .tprot{font-size:11px;font-weight:800;color:var(--green);background:#34d39918;border:1px solid var(--green);
+    border-radius:20px;padding:5px 11px;white-space:nowrap;display:inline-flex;gap:5px;align-items:center}
   .dev .acts{display:flex;gap:7px;flex-wrap:wrap}
   .dvbtn{border:1px solid var(--line2);background:var(--bg2);color:var(--ink);border-radius:9px;
     padding:8px 12px;font-weight:700;font-size:12.5px}
@@ -245,6 +247,33 @@
   .mrow .v{font-weight:600;font-size:13.5px;text-align:right;word-break:break-word}
   .macts{display:flex;gap:9px;flex-wrap:wrap;padding:14px 22px 22px}
   .macts .dvbtn{flex:1 1 auto;text-align:center;padding:11px}
+
+  /* ---------- SEDES · ESCUDO DE SEGURIDAD ---------- */
+  .shieldhero{display:grid;grid-template-columns:auto 1fr;gap:22px;align-items:center;
+    background:linear-gradient(135deg,var(--panel2),var(--panel));border:1px solid var(--line2);
+    border-radius:18px;padding:20px 24px;margin-bottom:20px}
+  @media(max-width:560px){.shieldhero{grid-template-columns:1fr;justify-items:center;text-align:center}}
+  .shieldhero .warhead .mini{margin-top:10px}
+  .scard{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 20px;
+    margin-bottom:14px;border-left:4px solid var(--line2)}
+  .scard .sh{display:flex;align-items:center;gap:14px}
+  .sbadge{width:60px;height:60px;border-radius:15px;display:grid;place-items:center;flex:0 0 auto;line-height:1}
+  .sbadge .n{font-size:21px;font-weight:900} .sbadge .gr{font-size:10px;font-weight:800;letter-spacing:.14em;margin-top:2px}
+  .scard .si{flex:1;min-width:0}
+  .scard .si .nm{font-size:16px;font-weight:800;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .scard .si .mt{color:var(--muted);font-size:12.5px;margin-top:3px}
+  .smini{display:flex;gap:18px;flex-wrap:wrap;margin:14px 0 4px}
+  .smini .m .n{font-size:16px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1}
+  .smini .m .t{font-size:10.5px;color:var(--muted);margin-top:3px}
+  .weak{margin:12px 0 0;display:flex;flex-direction:column;gap:7px}
+  .weak .w{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:var(--ink)}
+  .weak .w .dt{color:var(--amber);flex:0 0 auto} .weak .ok{color:var(--green);font-size:12.5px}
+  .sacts{display:flex;gap:8px;flex-wrap:wrap;margin-top:15px}
+  .sbtn{background:var(--bg2);border:1px solid var(--line2);color:var(--ink);border-radius:9px;
+    padding:9px 13px;font-weight:700;font-size:12.5px;display:flex;gap:6px;align-items:center}
+  .sbtn:hover{border-color:var(--cyan)}
+  .sbtn.shield{border-color:var(--green);color:var(--green)} .sbtn.shield:hover{background:#34d39912}
+  .sbtn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2}
 
   /* ---------- REPORTE ---------- */
   .reportbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}
@@ -723,20 +752,84 @@ async function copilotAnalyze(text){
   }; }
 }
 
-/* ============ SEDES ============ */
+/* ============ SEDES · ESCUDO DE SEGURIDAD ============ */
+function gradeOf(s){ return s>=85?['A','var(--green)']:s>=70?['B','var(--cyan)']:s>=50?['C','var(--amber)']:['D','var(--red)']; }
+function parseUnmanaged(viols){ for(const v of (viols||[])){ const m=/(\d+)\s+equipo.*sin gestionar/i.exec(v); if(m) return +m[1]; } return 0; }
+// Puntuación de seguridad DETERMINISTA (0-100) por sede + puntos débiles.
+function siteShield(s, viols, sl, inThreat){
+  const su=s.summary||{}; let score=100; const weak=[];
+  if(!s.online){ score-=35; weak.push('Sede sin conexión ahora mismo'); }
+  (viols||[]).forEach(v=>{
+    if(/protecci/i.test(v)){ score-=22; weak.push('Protección desactivada'); }
+    else if(/sin gestionar/i.test(v)){ const n=parseUnmanaged([v]); score-=Math.min(30,5+n*3); weak.push(n+' equipo(s) sin clasificar'); }
+    else if(/cr[ií]tico/i.test(v)){ score-=20; weak.push(v); }
+    else if(/admin remota/i.test(v)){ score-=10; weak.push('Sin administración remota (no puedes responder a distancia)'); }
+    else { score-=6; weak.push(v); }
+  });
+  const al=su.alerts||0; if(al){ score-=Math.min(15,al*3); weak.push(al+' alerta(s) de seguridad activa(s)'); }
+  const cd=su.criticals_down||0; if(cd && !weak.some(w=>/cr[ií]tico/i.test(w))){ score-=Math.min(30,cd*15); weak.push(cd+' activo(s) crítico(s) caído(s)'); }
+  if(sl && sl.uptime_pct!=null && sl.uptime_pct<98){ score-=Math.min(15,Math.round(98-sl.uptime_pct)); weak.push('Uptime bajo en 30 días ('+sl.uptime_pct+'%)'); }
+  if(inThreat){ score-=12; weak.push('Aparece en una amenaza correlacionada entre sedes'); }
+  score=Math.max(0,Math.min(100,Math.round(score)));
+  return {score, weak};
+}
 async function renderSites(c){
-  const d = await api('/v1/sites'); const sites=d.sites||[];
-  if(!sites.length){ c.innerHTML='<div class="empty">Aún no tienes sedes vinculadas. Vincula una desde la app.</div>'; return; }
-  let rows=sites.map(s=>{ const on=s.online; const su=s.summary||{};
-    return `<tr>
-      <td><b>${esc(s.site_name)}</b></td>
-      <td><span class="pill" style="background:${on?'#34d39922':'#f2555a22'};color:${on?'var(--green)':'var(--red)'}"><span class="dot" style="background:${on?'var(--green)':'var(--red)'}"></span>${on?'En línea':'Sin conexión'}</span></td>
-      <td class="num">${su.devices_online||0}/${su.devices_total||0}</td>
-      <td class="num" style="color:${su.alerts?'var(--amber)':'var(--muted)'}">${su.alerts||0}</td>
-      <td class="num" style="color:${su.criticals_down?'var(--red)':'var(--muted)'}">${su.criticals_down||0}</td>
-      <td class="muted">${s.remote_admin?'Sí':'No'}</td></tr>`;
-  }).join('');
-  c.innerHTML=`<div class="tscroll"><table><thead><tr><th>Sede</th><th>Estado</th><th>Equipos</th><th>Alertas</th><th>Críticos caídos</th><th>Admin remota</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const R=await Promise.allSettled([api('/v1/sites'),api('/v1/fleet/policy'),api('/v1/sla?days=30'),api('/v1/threats')]);
+  const sites=((R[0].status==='fulfilled'?R[0].value:{})||{}).sites||[];
+  if(!sites.length){ c.innerHTML='<div class="empty">Aún no tienes sedes vinculadas. Vincula una desde la app RedProtec.</div>'; return; }
+  const pol=(R[1].status==='fulfilled'?R[1].value:{})||{};
+  const violById={}; (pol.sites||[]).forEach(x=>{ violById[x.site_id]=x.violations||[]; });
+  const sla=(R[2].status==='fulfilled'?R[2].value:{})||{}; const slaByName={}; (sla.sites||[]).forEach(x=>slaByName[x.site_name]=x);
+  const thr=(R[3].status==='fulfilled'?R[3].value:{})||{}; const thrNames=new Set(); (thr.threats||[]).forEach(t=>(t.site_names||[]).forEach(n=>thrNames.add(n)));
+
+  const enriched=sites.map(s=>{ const sh=siteShield(s, violById[s.site_id], slaByName[s.site_name], thrNames.has(s.site_name));
+    return {s, sh, unmanaged:parseUnmanaged(violById[s.site_id])}; });
+  const avg=Math.round(enriched.reduce((a,e)=>a+e.sh.score,0)/enriched.length);
+  const worst=enriched.slice().sort((a,b)=>a.sh.score-b.sh.score)[0];
+  const attention=enriched.filter(e=>e.sh.score<70).length;
+  const [aG,aC]=gradeOf(avg);
+  _nav.sites=attention||0; buildNav();
+
+  let h=`<div class="shieldhero">
+    <div class="sbadge" style="background:${aC}1f;color:${aC};width:82px;height:82px;border-radius:20px"><div><div class="n" style="font-size:30px">${avg}</div><div class="gr">ESCUDO ${aG}</div></div></div>
+    <div class="warhead"><div class="k">Postura de seguridad de tu flota</div>
+      <h3>${attention?`${attention} sede(s) necesitan refuerzo`:'Tu flota está bien protegida'}</h3>
+      <div class="mini"><div class="m"><div class="n">${enriched.length}</div><div class="t">Sedes</div></div>
+        <div class="m"><div class="n" style="color:${worst?gradeOf(worst.sh.score)[1]:'var(--ink)'}">${worst?worst.sh.score:'—'}</div><div class="t">Más baja${worst?' ('+esc(worst.s.site_name)+')':''}</div></div>
+        <div class="m"><div class="n" style="color:${attention?'var(--amber)':'var(--green)'}">${attention}</div><div class="t">A reforzar</div></div></div></div>
+  </div>`;
+
+  enriched.sort((a,b)=>a.sh.score-b.sh.score);  // peor primero
+  enriched.forEach(({s,sh,unmanaged})=>{ const su=s.summary||{}; const [g,col]=gradeOf(sh.score); const sl=slaByName[s.site_name];
+    const weakHtml = sh.weak.length
+      ? '<div class="weak">'+sh.weak.map(w=>`<div class="w"><span class="dt">▸</span>${esc(w)}</div>`).join('')+'</div>'
+      : '<div class="weak"><span class="ok">✓ Sin puntos débiles — sede blindada.</span></div>';
+    h+=`<div class="scard" style="border-left-color:${col}">
+      <div class="sh">
+        <div class="sbadge" style="background:${col}1f;color:${col}"><div><div class="n">${sh.score}</div><div class="gr">${g}</div></div></div>
+        <div class="si"><div class="nm">${esc(s.site_name)}
+          <span class="pill" style="background:${s.online?'#34d39922':'#f2555a22'};color:${s.online?'var(--green)':'var(--red)'}"><span class="dot" style="background:${s.online?'var(--green)':'var(--red)'}"></span>${s.online?'En línea':'Sin conexión'}</span></div>
+          <div class="mt">${esc((su.protection_mode&&su.protection_mode!=='unknown')?('Protección: '+su.protection_mode):'Protección sin definir')} · Admin remota: ${s.remote_admin?'sí':'no'}</div></div>
+      </div>
+      <div class="smini">
+        <div class="m"><div class="n" style="color:var(--cyan)">${su.devices_online||0}/${su.devices_total||0}</div><div class="t">Equipos en línea</div></div>
+        <div class="m"><div class="n" style="color:${unmanaged?'#ff9f45':'var(--muted)'}">${unmanaged}</div><div class="t">Sin clasificar</div></div>
+        <div class="m"><div class="n" style="color:${su.alerts?'var(--amber)':'var(--muted)'}">${su.alerts||0}</div><div class="t">Alertas</div></div>
+        <div class="m"><div class="n" style="color:${su.criticals_down?'var(--red)':'var(--muted)'}">${su.criticals_down||0}</div><div class="t">Críticos caídos</div></div>
+        <div class="m"><div class="n">${sl&&sl.uptime_pct!=null?sl.uptime_pct+'%':'—'}</div><div class="t">Uptime 30d</div></div>
+      </div>
+      ${weakHtml}
+      <div class="sacts">
+        <button class="sbtn" data-go="devices" data-site="${esc(s.site_id)}"><svg viewBox="0 0 24 24"><path d="M4 5h16v10H4zM2 19h20"/></svg> Equipos</button>
+        <button class="sbtn" data-go="map" data-site="${esc(s.site_id)}"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg> Mapa</button>
+        ${(unmanaged>0 && s.remote_admin)?`<button class="sbtn shield" data-shield="${esc(s.site_id)}" data-name="${esc(s.site_name)}"><svg viewBox="0 0 24 24"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg> Blindar (${unmanaged})</button>`:''}
+        <button class="sbtn" data-go="report"><svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8l-5-5H8z"/></svg> Reporte</button>
+      </div></div>`;
+  });
+  h+=`<p class="muted" style="font-size:11.5px;margin-top:6px">El Escudo (0–100) resume la seguridad de cada sede con señales reales: equipos sin clasificar, protección, activos críticos, alertas, uptime y amenazas. Refuerza lo que está en ámbar para subirlo.</p>`;
+  c.innerHTML=h;
+  c.querySelectorAll('.sbtn[data-go]').forEach(b=>b.onclick=()=>{ if(b.dataset.site)_devSite=b.dataset.site; go(b.dataset.go); });
+  c.querySelectorAll('.sbtn[data-shield]').forEach(b=>b.onclick=()=>quarantineSite(b.dataset.shield,b.dataset.name));
 }
 
 /* ============ EQUIPOS (ver + controlar dispositivos de tus redes) ============ */
@@ -754,20 +847,28 @@ function deviceEmoji(d){ const s=((d.name||'')+' '+(d.vendor||'')+' '+(d.device_
   return'🔌'; }
 const _TRUST_LABEL={trusted:'Confiable',blocked:'Bloqueado',unknown:'Sin clasificar'};
 function _actMsg(a){ return {block:'Equipo bloqueado',unblock:'Equipo desbloqueado',trust:'Equipo marcado de confianza',rename:'Equipo renombrado'}[a]||'Orden enviada'; }
-function devActions(d){ const blocked=d.trust==='blocked'; let a='';
-  a+= blocked ? `<button class="dvbtn trust" data-act="unblock">Desbloquear</button>`
-             : `<button class="dvbtn block" data-act="block">Bloquear</button>`;
-  if(d.trust!=='trusted') a+=`<button class="dvbtn trust" data-act="trust">Confiar</button>`;
-  a+=`<button class="dvbtn" data-act="rename">Renombrar</button>`; return a; }
-function devRow(d, canAct){ const trust=d.trust||'unknown'; const mac=d.mac||'';
-  const sel=_devSel.has(mac);
+// El router/gateway NUNCA se bloquea (cortaría la red); los confiables tampoco
+// muestran «Bloquear» (ya están aprobados). Se protegen de acciones destructivas.
+function isGatewayMac(mac,gwMac){ return !!gwMac && (mac||'')===gwMac; }
+function canBlockDev(d,gwMac){ return !isGatewayMac(d.mac,gwMac) && (d.trust||'unknown')!=='trusted'; }
+function devActions(d, gwMac){ const mac=d.mac||'', blocked=d.trust==='blocked', trusted=d.trust==='trusted';
+  if(isGatewayMac(mac,gwMac)){ let a='<span class="tprot">🛡 Protegido</span>';
+    if(blocked) a+='<button class="dvbtn trust" data-act="unblock">Desbloquear</button>';
+    a+='<button class="dvbtn" data-act="rename">Renombrar</button>'; return a; }
+  let a='';
+  if(blocked) a+='<button class="dvbtn trust" data-act="unblock">Desbloquear</button>';
+  else if(!trusted) a+='<button class="dvbtn block" data-act="block">Bloquear</button>';
+  if(!trusted) a+='<button class="dvbtn trust" data-act="trust">Confiar</button>';
+  a+='<button class="dvbtn" data-act="rename">Renombrar</button>'; return a; }
+function devRow(d, canAct, gwMac){ const trust=d.trust||'unknown'; const mac=d.mac||'';
+  const sel=_devSel.has(mac); const prot=isGatewayMac(mac,gwMac);
   return `<div class="dev" data-mac="${esc(mac)}">
-    ${canAct?`<input type="checkbox" class="dvsel" data-mac="${esc(mac)}" ${sel?'checked':''} title="Seleccionar">`:''}
+    ${canAct&&!prot?`<input type="checkbox" class="dvsel" data-mac="${esc(mac)}" ${sel?'checked':''} title="Seleccionar">`:(canAct?'<span style="width:18px;flex:0 0 auto"></span>':'')}
     <div class="ava dvopen" data-mac="${esc(mac)}">${deviceEmoji(d)}<span class="ol" style="background:${d.online?'var(--green)':'var(--muted2)'}"></span></div>
     <div class="meta dvopen" data-mac="${esc(mac)}"><div class="nm">${esc(d.name||mac||'Equipo')}${d.is_critical?' <span class="crit">CRÍTICO</span>':''}</div>
       <div class="sub">${esc(d.vendor||'—')} · ${esc(d.ip||'—')} · ${esc((mac||'—').toUpperCase())}</div></div>
     <span class="tpill ${trust}">${_TRUST_LABEL[trust]}</span>
-    <div class="acts">${canAct?devActions(d):'<span class="muted" style="font-size:12px">solo lectura</span>'}</div></div>`; }
+    <div class="acts">${canAct?devActions(d,gwMac):'<span class="muted" style="font-size:12px">solo lectura</span>'}</div></div>`; }
 function exportDevicesCsv(list, siteName){
   const H=['Nombre','IP','MAC','Fabricante','Estado','Clasificación','Crítico'];
   const rows=[H].concat(list.map(d=>[d.name||'',d.ip||'',(d.mac||'').toUpperCase(),d.vendor||'',
@@ -780,9 +881,40 @@ function exportDevicesCsv(list, siteName){
   toast('CSV exportado');
 }
 function _devErr(e){ return e.status===402?'Requiere plan Pro para controlar equipos.':e.status===403?'Tu rol no permite esta acción.':(e.message||'No se pudo'); }
+function showConfirm(title, msg, onYes, yesLabel, danger){
+  const ov=document.createElement('div'); ov.className='modal';
+  ov.innerHTML=`<div class="modalcard" style="width:min(94vw,430px)">
+    <div class="mch"><div class="nm">${esc(title)}</div><button class="close" aria-label="Cerrar">×</button></div>
+    <div class="mbody"><p style="margin:8px 0 4px;line-height:1.55;color:var(--ink)">${esc(msg)}</p></div>
+    <div class="macts"><button class="dvbtn" data-x="no">Cancelar</button>
+      <button class="dvbtn ${danger?'block':'trust'}" data-x="yes" style="flex:1">${esc(yesLabel||'Confirmar')}</button></div></div>`;
+  const close=()=>ov.remove();
+  ov.addEventListener('click',e=>{ if(e.target===ov) close(); });
+  ov.querySelector('.close').onclick=close;
+  ov.querySelector('[data-x="no"]').onclick=close;
+  ov.querySelector('[data-x="yes"]').onclick=async()=>{ close(); try{ await onYes(); }catch(e){} };
+  document.body.appendChild(ov);
+}
+// «Blindar»: pone en cuarentena (bloquea) TODO lo SIN CLASIFICAR de una sede,
+// sin tocar los confiables ni el router. Acción de seguridad de un toque.
+async function quarantineSite(siteId, siteName){
+  let detail; try{ detail=await api('/v1/sites/'+encodeURIComponent(siteId)); }
+  catch(e){ toast('No se pudo leer la sede',true); return; }
+  if(!detail.remote_admin){ toast('Esta red no permite administración remota',true); return; }
+  if(!detail.can_command){ toast('Requiere plan Pro para blindar',true); return; }
+  const gwMac=(findGateway(detail.devices||[])||{}).mac||'';
+  const targets=(detail.devices||[]).filter(d=>(d.trust||'unknown')==='unknown' && !isGatewayMac(d.mac,gwMac));
+  if(!targets.length){ toast('No hay equipos sin clasificar — esta sede ya está blindada 🎉'); return; }
+  showConfirm('🛡 Blindar «'+siteName+'»',
+    'Se pondrán en cuarentena '+targets.length+' equipo(s) SIN CLASIFICAR de esta red. Los confiables y el router NO se tocan. Puedes revertirlo cuando quieras.',
+    async()=>{ let ok=0; for(const d of targets){ try{ await apiPost('/v1/sites/'+encodeURIComponent(siteId)+'/commands',{action:'block',mac:d.mac,value:null}); ok++; }
+        catch(e){ if(e.status===402||e.status===403){ toast(_devErr(e),true); break; } } }
+      toast('Blindaje enviado: '+ok+' equipo(s) en cuarentena — se aplica al sincronizar'); if(current==='sites') load(); },
+    'Blindar '+targets.length+' equipo(s)', true);
+}
 // Ficha de equipo reutilizable (Equipos y Mapa). onChanged(act,value) para refrescar.
-function openDeviceModal(d, siteId, canAct, onChanged){
-  const mac=d.mac||''; const trust=d.trust||'unknown';
+function openDeviceModal(d, siteId, canAct, onChanged, gwMac){
+  const mac=d.mac||''; const trust=d.trust||'unknown'; const prot=isGatewayMac(mac,gwMac);
   const cons=d.bytes_per_sec!=null?((d.consumption_estimated?'~':'')+fmtBps(d.bytes_per_sec)):null;
   const row=(k,v)=>v?`<div class="mrow"><span class="k">${k}</span><span class="v">${v}</span></div>`:'';
   const ov=document.createElement('div'); ov.className='modal';
@@ -802,8 +934,9 @@ function openDeviceModal(d, siteId, canAct, onChanged){
       ${row('Consumo ahora', cons?esc(cons):'—')}
     </div>
     ${canAct?`<div class="macts">
-      ${trust==='blocked'?'<button class="dvbtn trust" data-m="unblock">Desbloquear</button>':'<button class="dvbtn block" data-m="block">Bloquear</button>'}
-      ${trust!=='trusted'?'<button class="dvbtn trust" data-m="trust">Confiar</button>':''}
+      ${prot?'<span class="tprot" style="align-self:center">🛡 Protegido — no se bloquea</span>':''}
+      ${trust==='blocked'?'<button class="dvbtn trust" data-m="unblock">Desbloquear</button>':(!prot&&trust!=='trusted'?'<button class="dvbtn block" data-m="block">Bloquear</button>':'')}
+      ${!prot&&trust!=='trusted'?'<button class="dvbtn trust" data-m="trust">Confiar</button>':''}
       <button class="dvbtn" data-m="rename">Renombrar</button>
       <button class="dvbtn" data-m="set_owner">Responsable</button>
     </div>`:'<div class="macts"><span class="muted" style="font-size:12.5px">Solo lectura (sin admin remota o sin plan Pro).</span></div>'}
@@ -830,6 +963,7 @@ async function renderDevices(c){
   const devices = detail.devices||[];
   const site = sites.find(s=>s.site_id===_devSite)||{};
   const canAct = !!detail.can_command && !!detail.remote_admin;
+  const gwMac=(findGateway(devices)||{}).mac||'';
   // podar selección: solo equipos que siguen presentes
   const _macset=new Set(devices.map(d=>d.mac||'')); [..._devSel].forEach(m=>{ if(!_macset.has(m)) _devSel.delete(m); });
 
@@ -891,14 +1025,18 @@ async function renderDevices(c){
     el.querySelectorAll('.dvbulk button').forEach(b=>b.onclick=()=>bulkAct(b.dataset.b)); }
   async function bulkAct(act){
     if(act==='clear'){ _devSel.clear(); repaint(); return; }
-    const macs=[..._devSel]; let ok=0,fail=0;
+    let macs=[..._devSel]; let skipped=0;
+    if(act==='block'){ const before=macs.length;
+      macs=macs.filter(m=>{ const d=devices.find(x=>(x.mac||'')===m); return d && canBlockDev(d,gwMac); });
+      skipped=before-macs.length; }
+    let ok=0,fail=0;
     for(const mac of macs){ try{ await sendCmd(mac,act,null); ok++; }catch(e){ fail++; if(e.status===402||e.status===403){ toast(errMsg(e),true); break; } } }
     _devSel.clear();
-    toast(`${_actMsg(act)}: ${ok} equipo(s)`+(fail?` · ${fail} fallaron`:'')+' — se aplica al sincronizar', fail>0);
+    toast(`${_actMsg(act)}: ${ok} equipo(s)`+(skipped?` · ${skipped} protegido(s) intactos`:'')+(fail?` · ${fail} fallaron`:'')+' — se aplica al sincronizar', fail>0);
     repaint(); }
 
   function openModal(mac){ const d=devices.find(x=>(x.mac||'')===mac); if(!d) return;
-    openDeviceModal(d,_devSite,canAct,(act,value)=>{ applyLocal(d,act,value); repaint(); }); }
+    openDeviceModal(d,_devSite,canAct,(act,value)=>{ applyLocal(d,act,value); repaint(); },gwMac); }
 
   function bindRows(cont){
     cont.querySelectorAll('.dev .dvbtn').forEach(b=>b.onclick=async()=>{
@@ -915,7 +1053,7 @@ async function renderDevices(c){
   }
   function paintList(){ const list=devices.filter(match); const cont=document.getElementById('devList');
     if(!list.length){ cont.innerHTML='<div class="empty">Sin equipos que coincidan con el filtro/búsqueda.</div>'; return; }
-    cont.innerHTML=list.map(d=>devRow(d,canAct)).join(''); bindRows(cont); }
+    cont.innerHTML=list.map(d=>devRow(d,canAct,gwMac)).join(''); bindRows(cont); }
 
   paintSummary(); paintChips(); paintBulk(); paintList();
   document.getElementById('devSearch').oninput=(e)=>{ _devQuery=e.target.value; paintList(); };
@@ -980,8 +1118,9 @@ async function renderMap(c){
     <p class="muted" style="font-size:11.5px;margin-top:10px">Topología lógica de «${esc(site.site_name||'tu red')}» — ${nodes.length+(gw?1:0)} equipo(s) alrededor del router. Toca cualquiera para ver su ficha y controlarlo.</p>`;
   c.innerHTML=h;
   c.querySelectorAll('.dvtab').forEach(b=>b.onclick=()=>{ _devSite=b.dataset.site; load(); });
+  const _gwMac=(gw||{}).mac||'';
   c.querySelectorAll('.mapnode').forEach(g=>{ const mac=g.dataset.mac; if(!mac)return;
-    g.onclick=()=>{ const d=devices.find(x=>(x.mac||'')===mac); if(d) openDeviceModal(d,_devSite,canAct,()=>load()); }; });
+    g.onclick=()=>{ const d=devices.find(x=>(x.mac||'')===mac); if(d) openDeviceModal(d,_devSite,canAct,()=>load(),_gwMac); }; });
 }
 
 /* ============ AMENAZAS ============ */
