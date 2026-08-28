@@ -246,6 +246,16 @@
   .macts{display:flex;gap:9px;flex-wrap:wrap;padding:14px 22px 22px}
   .macts .dvbtn{flex:1 1 auto;text-align:center;padding:11px}
 
+  /* ---------- MAPA DE RED ---------- */
+  .mapwrap{background:radial-gradient(circle at 50% 45%,rgba(34,211,238,.06),transparent 60%),var(--panel);
+    border:1px solid var(--line);border-radius:16px;padding:8px;overflow:hidden}
+  .mapwrap svg{width:100%;height:auto;display:block}
+  .mapnode{cursor:pointer}
+  .mapnode:hover circle.bg{stroke-width:5}
+  .maplegend{display:flex;gap:16px;flex-wrap:wrap;margin-top:14px;font-size:12.5px;color:var(--muted)}
+  .maplegend .lg{display:flex;gap:7px;align-items:center}
+  .maplegend .d{width:11px;height:11px;border-radius:50%;flex:0 0 auto}
+
   /* ---------- SALA DE GUERRA (NOC) ---------- */
   .warhero{display:grid;grid-template-columns:auto 1fr auto;gap:26px;align-items:center;
     background:linear-gradient(135deg,var(--panel2),var(--panel));border:1px solid var(--line2);
@@ -497,6 +507,7 @@ const VIEWS = [
   {id:'war', title:'Sala de Guerra', sub:'Centro de operaciones en vivo · disponibilidad, incidentes on-call y SLA', icon:'<path d="M12 2v4M12 18v4M2 12h4M18 12h4M12 12l6-3M5 19l7-7"/><circle cx="12" cy="12" r="3"/>', render:renderWarRoom},
   {id:'sites', title:'Sedes', sub:'Todas tus redes/sedes en vivo', icon:'<path d="M4 21V8l8-5 8 5v13M9 21v-6h6v6"/>', render:renderSites},
   {id:'devices', title:'Equipos', sub:'Todos los dispositivos de tus redes — verlos y controlarlos', icon:'<path d="M4 5h16v10H4zM2 19h20M9 9h6"/>', render:renderDevices},
+  {id:'map', title:'Mapa de red', sub:'Topología en vivo de tus equipos alrededor del router', icon:'<circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 7l3 3M17 7l-3 3M7 17l3-3M17 17l-3-3"/>', render:renderMap},
   {id:'threats', title:'Amenazas', sub:'Correlacionadas entre sedes', icon:'<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/>', render:renderThreats},
   {id:'policy', title:'Políticas', sub:'El estándar de tu organización y su cumplimiento', icon:'<path d="M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>', render:renderPolicy},
   {id:'consumption', title:'Consumo', sub:'Quién consume más en tu flota', icon:'<path d="M3 3v18h18M8 15l3-4 3 3 4-6"/>', render:renderConsumption},
@@ -741,6 +752,49 @@ function exportDevicesCsv(list, siteName){
   document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},600);
   toast('CSV exportado');
 }
+function _devErr(e){ return e.status===402?'Requiere plan Pro para controlar equipos.':e.status===403?'Tu rol no permite esta acción.':(e.message||'No se pudo'); }
+// Ficha de equipo reutilizable (Equipos y Mapa). onChanged(act,value) para refrescar.
+function openDeviceModal(d, siteId, canAct, onChanged){
+  const mac=d.mac||''; const trust=d.trust||'unknown';
+  const cons=d.bytes_per_sec!=null?((d.consumption_estimated?'~':'')+fmtBps(d.bytes_per_sec)):null;
+  const row=(k,v)=>v?`<div class="mrow"><span class="k">${k}</span><span class="v">${v}</span></div>`:'';
+  const ov=document.createElement('div'); ov.className='modal';
+  ov.innerHTML=`<div class="modalcard">
+    <div class="mch"><div class="ava">${deviceEmoji(d)}<span class="ol" style="background:${d.online?'var(--green)':'var(--muted2)'}"></span></div>
+      <div><div class="nm">${esc(d.name||mac||'Equipo')}</div><div class="muted" style="font-size:12px">${esc(d.vendor||'Fabricante desconocido')}</div></div>
+      <button class="close" aria-label="Cerrar">×</button></div>
+    <div class="mbody">
+      ${row('Estado', d.online?'<span style="color:var(--green)">● En línea</span>':'<span class="muted">○ Desconectado</span>')}
+      ${row('Clasificación', `<span class="tpill ${trust}">${_TRUST_LABEL[trust]}</span>`)}
+      ${row('Crítico', d.is_critical?'<span class="crit">SÍ</span>':'No')}
+      ${row('Dirección IP', esc(d.ip||'—'))}
+      ${row('MAC', esc((mac||'—').toUpperCase()))}
+      ${row('Fabricante', esc(d.vendor||'—'))}
+      ${row('Responsable', esc(d.owner||'— (sin asignar)'))}
+      ${row('Área / Zona', esc(d.area||'—'))}
+      ${row('Consumo ahora', cons?esc(cons):'—')}
+    </div>
+    ${canAct?`<div class="macts">
+      ${trust==='blocked'?'<button class="dvbtn trust" data-m="unblock">Desbloquear</button>':'<button class="dvbtn block" data-m="block">Bloquear</button>'}
+      ${trust!=='trusted'?'<button class="dvbtn trust" data-m="trust">Confiar</button>':''}
+      <button class="dvbtn" data-m="rename">Renombrar</button>
+      <button class="dvbtn" data-m="set_owner">Responsable</button>
+    </div>`:'<div class="macts"><span class="muted" style="font-size:12.5px">Solo lectura (sin admin remota o sin plan Pro).</span></div>'}
+  </div>`;
+  const close=()=>ov.remove();
+  ov.addEventListener('click',e=>{ if(e.target===ov) close(); });
+  ov.querySelector('.close').onclick=close;
+  ov.querySelectorAll('.macts .dvbtn').forEach(b=>b.onclick=async()=>{
+    const act=b.dataset.m; let value=null;
+    if(act==='rename'){ value=prompt('Nuevo nombre para este equipo:', d.name||''); if(value===null)return; value=value.trim(); if(!value)return; }
+    if(act==='set_owner'){ value=prompt('¿Quién es el responsable de este equipo?', d.owner||''); if(value===null)return; value=value.trim(); }
+    b.disabled=true; const old=b.textContent; b.textContent='…';
+    try{ await apiPost('/v1/sites/'+encodeURIComponent(siteId)+'/commands',{action:act,mac,value});
+      toast(_actMsg(act)+' — se aplica al sincronizar'); close(); onChanged&&onChanged(act,value); }
+    catch(e){ toast(_devErr(e),true); b.disabled=false; b.textContent=old; }
+  });
+  document.body.appendChild(ov);
+}
 async function renderDevices(c){
   const sd = await api('/v1/sites'); const sites=sd.sites||[];
   if(!sites.length){ c.innerHTML='<div class="empty">Aún no tienes redes vinculadas. Vincula una desde la app RedProtec y aquí verás todos sus equipos.</div>'; return; }
@@ -817,44 +871,7 @@ async function renderDevices(c){
     repaint(); }
 
   function openModal(mac){ const d=devices.find(x=>(x.mac||'')===mac); if(!d) return;
-    const trust=d.trust||'unknown'; const cons=d.bytes_per_sec!=null?((d.consumption_estimated?'~':'')+fmtBps(d.bytes_per_sec)):null;
-    const row=(k,v)=>v?`<div class="mrow"><span class="k">${k}</span><span class="v">${v}</span></div>`:'';
-    const ov=document.createElement('div'); ov.className='modal';
-    ov.innerHTML=`<div class="modalcard">
-      <div class="mch"><div class="ava">${deviceEmoji(d)}<span class="ol" style="background:${d.online?'var(--green)':'var(--muted2)'}"></span></div>
-        <div><div class="nm">${esc(d.name||mac||'Equipo')}</div><div class="muted" style="font-size:12px">${esc(d.vendor||'Fabricante desconocido')}</div></div>
-        <button class="close" aria-label="Cerrar">×</button></div>
-      <div class="mbody">
-        ${row('Estado', d.online?'<span style="color:var(--green)">● En línea</span>':'<span class="muted">○ Desconectado</span>')}
-        ${row('Clasificación', `<span class="tpill ${trust}">${_TRUST_LABEL[trust]}</span>`)}
-        ${row('Crítico', d.is_critical?'<span class="crit">SÍ</span>':'No')}
-        ${row('Dirección IP', esc(d.ip||'—'))}
-        ${row('MAC', esc((mac||'—').toUpperCase()))}
-        ${row('Fabricante', esc(d.vendor||'—'))}
-        ${row('Responsable', esc(d.owner||'— (sin asignar)'))}
-        ${row('Área / Zona', esc(d.area||'—'))}
-        ${row('Consumo ahora', cons?esc(cons):'—')}
-      </div>
-      ${canAct?`<div class="macts">
-        ${trust==='blocked'?'<button class="dvbtn trust" data-m="unblock">Desbloquear</button>':'<button class="dvbtn block" data-m="block">Bloquear</button>'}
-        ${trust!=='trusted'?'<button class="dvbtn trust" data-m="trust">Confiar</button>':''}
-        <button class="dvbtn" data-m="rename">Renombrar</button>
-        <button class="dvbtn" data-m="set_owner">Responsable</button>
-      </div>`:'<div class="macts"><span class="muted" style="font-size:12.5px">Solo lectura (sin admin remota o sin plan Pro).</span></div>'}
-    </div>`;
-    const close=()=>ov.remove();
-    ov.addEventListener('click',e=>{ if(e.target===ov) close(); });
-    ov.querySelector('.close').onclick=close;
-    ov.querySelectorAll('.macts .dvbtn').forEach(b=>b.onclick=async()=>{
-      const act=b.dataset.m; let value=null;
-      if(act==='rename'){ value=prompt('Nuevo nombre para este equipo:', d.name||''); if(value===null)return; value=value.trim(); if(!value)return; }
-      if(act==='set_owner'){ value=prompt('¿Quién es el responsable de este equipo?', d.owner||''); if(value===null)return; value=value.trim(); }
-      b.disabled=true; const old=b.textContent; b.textContent='…';
-      try{ await sendCmd(mac,act,value); toast(_actMsg(act)+' — se aplica al sincronizar'); close(); repaint(); }
-      catch(e){ toast(errMsg(e),true); b.disabled=false; b.textContent=old; }
-    });
-    document.body.appendChild(ov);
-  }
+    openDeviceModal(d,_devSite,canAct,(act,value)=>{ applyLocal(d,act,value); repaint(); }); }
 
   function bindRows(cont){
     cont.querySelectorAll('.dev .dvbtn').forEach(b=>b.onclick=async()=>{
@@ -876,6 +893,68 @@ async function renderDevices(c){
   paintSummary(); paintChips(); paintBulk(); paintList();
   document.getElementById('devSearch').oninput=(e)=>{ _devQuery=e.target.value; paintList(); };
   document.getElementById('devExport').onclick=()=>exportDevicesCsv(devices.filter(match), site.site_name);
+}
+
+/* ============ MAPA DE RED (topología en vivo) ============ */
+const _MC={green:'#34d399',amber:'#f5b642',red:'#f2555a',grey:'#5f7a94',cyan:'#22d3ee',line:'#243347',ink:'#eaf6ff',muted:'#8ea6bf'};
+function nodeColor(d){ if(!d.online)return _MC.grey; const t=d.trust||'unknown';
+  return t==='blocked'?_MC.red:t==='trusted'?_MC.green:_MC.amber; }
+function findGateway(devs){ return devs.find(d=>/router|gateway|modem|m[oó]dem|puerta de enlace/i.test((d.name||'')+' '+(d.vendor||'')))
+    || devs.find(d=>/\.1$/.test(d.ip||'')) || null; }
+function clipTxt(s,n){ s=String(s||''); return s.length>n?s.slice(0,n-1)+'…':s; }
+function mapLayout(n){ const pos=[]; let idx=0, ring=1;
+  while(idx<n){ const radius=ring*118; const cap=Math.max(1,Math.floor(2*Math.PI*radius/96));
+    const take=Math.min(cap,n-idx); const off=(ring%2)?0:Math.PI/take;
+    for(let i=0;i<take;i++){ const a=(2*Math.PI*i/take)-Math.PI/2+off; pos.push({x:Math.cos(a)*radius,y:Math.sin(a)*radius}); }
+    idx+=take; ring++; }
+  return {pos, rings:ring-1}; }
+async function renderMap(c){
+  const sd=await api('/v1/sites'); const sites=sd.sites||[];
+  if(!sites.length){ c.innerHTML='<div class="empty">Aún no tienes redes vinculadas.</div>'; return; }
+  if(!_devSite||!sites.find(s=>s.site_id===_devSite)) _devSite=sites[0].site_id;
+  const detail=await api('/v1/sites/'+encodeURIComponent(_devSite));
+  const devices=detail.devices||[]; const canAct=!!detail.can_command&&!!detail.remote_admin;
+  const site=sites.find(s=>s.site_id===_devSite)||{};
+
+  let h='';
+  if(sites.length>1) h+='<div class="dvtabs">'+sites.map(s=>`<button class="dvtab ${s.site_id===_devSite?'active':''}" data-site="${esc(s.site_id)}"><span class="d" style="background:${s.online?'var(--green)':'var(--muted2)'}"></span>${esc(s.site_name)}</button>`).join('')+'</div>';
+  if(!devices.length){ h+='<div class="empty">Esta red no tiene inventario de equipos. Activa «Inventario completo» en el agente para ver el mapa.</div>';
+    c.innerHTML=h; c.querySelectorAll('.dvtab').forEach(b=>b.onclick=()=>{_devSite=b.dataset.site;load();}); return; }
+
+  const gw=findGateway(devices); const nodes=devices.filter(d=>d!==gw);
+  const {pos,rings}=mapLayout(nodes.length);
+  const maxR=(rings||1)*118, pad=78, size=2*(maxR+pad), cx=size/2, cy=size/2;
+  let svg=`<svg viewBox="0 0 ${size} ${size}" preserveAspectRatio="xMidYMid meet">
+    <defs><radialGradient id="hubg" cx="50%" cy="45%"><stop offset="0" stop-color="#16324a"/><stop offset="1" stop-color="#0b1420"/></radialGradient></defs>
+    <g stroke="${_MC.line}" stroke-width="1.5">`;
+  pos.forEach(p=>{ svg+=`<line x1="${cx}" y1="${cy}" x2="${(cx+p.x).toFixed(1)}" y2="${(cy+p.y).toFixed(1)}"/>`; });
+  svg+='</g>';
+  nodes.forEach((d,i)=>{ const p=pos[i], x=(cx+p.x), y=(cy+p.y), col=nodeColor(d);
+    svg+=`<g class="mapnode" data-mac="${esc(d.mac||'')}">
+      ${d.is_critical?`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="31" fill="none" stroke="${_MC.amber}" stroke-width="2" stroke-dasharray="3 4"/>`:''}
+      <circle class="bg" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="24" fill="#111a27" stroke="${col}" stroke-width="3"/>
+      <text x="${x.toFixed(1)}" y="${(y+7).toFixed(1)}" text-anchor="middle" font-size="21">${deviceEmoji(d)}</text>
+      <text x="${x.toFixed(1)}" y="${(y+43).toFixed(1)}" text-anchor="middle" font-size="12.5" fill="${_MC.muted}">${esc(clipTxt(d.name||d.mac,13))}</text></g>`;
+  });
+  const hubEmoji=gw?deviceEmoji(gw):'📶', hubName=gw?(gw.name||'Router'):'Router';
+  svg+=`<g class="mapnode" ${gw?`data-mac="${esc(gw.mac||'')}"`:''}>
+    <circle cx="${cx}" cy="${cy}" r="36" fill="url(#hubg)" stroke="${_MC.cyan}" stroke-width="2.5"/>
+    <text x="${cx}" y="${cy+8}" text-anchor="middle" font-size="28">${hubEmoji}</text>
+    <text x="${cx}" y="${cy+56}" text-anchor="middle" font-size="13" fill="${_MC.ink}" font-weight="700">${esc(clipTxt(hubName,16))}</text></g></svg>`;
+
+  h+=`<div class="mapwrap">${svg}</div>
+    <div class="maplegend">
+      <span class="lg"><span class="d" style="background:${_MC.green}"></span>Confiable</span>
+      <span class="lg"><span class="d" style="background:${_MC.amber}"></span>Sin clasificar</span>
+      <span class="lg"><span class="d" style="background:${_MC.red}"></span>Bloqueado</span>
+      <span class="lg"><span class="d" style="background:${_MC.grey}"></span>Desconectado</span>
+      <span class="lg"><span class="d" style="border:2px dashed ${_MC.amber}"></span>Crítico</span>
+    </div>
+    <p class="muted" style="font-size:11.5px;margin-top:10px">Topología lógica de «${esc(site.site_name||'tu red')}» — ${nodes.length+(gw?1:0)} equipo(s) alrededor del router. Toca cualquiera para ver su ficha y controlarlo.</p>`;
+  c.innerHTML=h;
+  c.querySelectorAll('.dvtab').forEach(b=>b.onclick=()=>{ _devSite=b.dataset.site; load(); });
+  c.querySelectorAll('.mapnode').forEach(g=>{ const mac=g.dataset.mac; if(!mac)return;
+    g.onclick=()=>{ const d=devices.find(x=>(x.mac||'')===mac); if(d) openDeviceModal(d,_devSite,canAct,()=>load()); }; });
 }
 
 /* ============ AMENAZAS ============ */
